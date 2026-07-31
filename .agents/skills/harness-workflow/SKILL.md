@@ -6,7 +6,7 @@ origin: harness_framework
 
 # Harness Workflow
 
-이 프로젝트는 Harness 프레임워크를 사용한다. 작업을 phase와 step으로 나누어 설계하고, 승인된 step 파일은 Codex 메인 세션이 worker 서브 에이전트로 순차 실행한다.
+이 프로젝트는 Harness 프레임워크를 사용한다. 작업을 phase와 step으로 나누어 설계하고, 승인된 step 파일은 Codex 메인 세션이 worker 서브 에이전트로 순차 실행한다. 한 step의 구현이 끝나면 메인 세션은 구현 결과를 그대로 커밋하지 않고, 코드 리뷰·테스트 리뷰를 병렬로 실행한 뒤 보안 리뷰와 CI 게이트까지 통과시킨다.
 
 ## Workflow
 
@@ -139,6 +139,11 @@ npm test
 - `feat-{task-name}` 브랜치 생성/checkout
 - 각 pending step을 worker 서브 에이전트에 하나씩 위임
 - `AGENTS.md` + `docs/*.md` 경로와 완료된 step `summary`를 worker 프롬프트에 전달
+- 구현 worker 완료 후 code-review worker와 test worker를 병렬 실행
+- 두 리뷰가 모두 통과한 뒤 security-review worker를 실행
+- 리뷰 결과를 종합하고, 실패하면 구현 worker에 원인·수정 제안을 전달해 재실행
+- 리뷰 통과 후에만 커밋하고 PR을 생성/갱신하며, PR CI 성공을 확인한 뒤 병합
+- PR CI가 실패하면 실패 원인과 안전하게 정제된 로그를 다음 구현 시도의 피드백으로 전달
 - 실패 시 최대 3회 재시도
 - 코드 변경(`feat`)과 메타데이터(`chore`)를 분리 커밋
 - `started_at`, `completed_at`, `failed_at`, `blocked_at` 기록
@@ -146,10 +151,30 @@ npm test
 
 worker가 담당하는 것:
 
-- step 파일과 관련 문서를 직접 읽고 구현한다
-- AC 커맨드를 실행한다
+- 구현 worker는 step 파일과 관련 문서를 직접 읽고 코드와 테스트를 작성한다
+- 구현 worker는 AC 커맨드를 실행하지만 git commit, push, merge는 하지 않는다
+- code-review/test worker는 변경 내용을 읽고 단위·통합 테스트, Ruff, Mypy, Pytest를 직접 실행한다. 테스트가 외부 동작을 검증하는지도 확인한다
+- security-review worker는 YAML, 경로 traversal, 입력값 검증, subprocess 경계, 로그의 credential·고객 데이터 노출을 점검한다
+- 리뷰 worker는 기본적으로 파일을 수정하거나 커밋하지 않는다. 리뷰 결과의 `changed_files`와 `committed`는 비어 있어야 한다
 - 최종 응답으로 `status`, `summary`, `changed_files`, `validation`, 필요 시 `error_message` 또는 `blocked_reason`을 보고한다
 - git commit, push, phase metadata 수정은 하지 않는다
+
+Step 실행 순서는 다음과 같다:
+
+```text
+implementation
+    ↓
+code-review + test-review (parallel, read-only)
+    ↓
+security-review (read-only)
+    ↓
+main decision
+    ├─ finding/failed check → implementation feedback → review again
+    └─ all pass → commit → PR CI check → merge
+                         └─ CI failure → diagnose → implementation feedback → review again
+```
+
+구현·리뷰·보안 결과의 접근 경계와 필수 검증 항목은 `scripts/step_pipeline.py`의 계약을 따른다. 메인 세션은 이 계약을 만족하지 않는 결과를 성공으로 처리하지 않는다.
 
 에러 복구:
 
