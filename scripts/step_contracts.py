@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -13,7 +14,18 @@ from typing import Any, Protocol
 
 
 PHASE_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
-REQUIRED_REVIEW_CHECKS = ("unit-tests", "integration-tests", "ruff", "mypy", "pytest")
+INITIAL_COMPLETION_CONDITION_COUNT = 10
+MAX_COMPLETION_CONDITIONS = 100
+MAX_COMPLETION_CONDITIONS_LENGTH = 20_000
+DEFAULT_COMPLETION_CRITERIA_PATH = "docs/completion-criteria.md"
+REQUIRED_REVIEW_CHECKS = (
+    "unit-tests",
+    "integration-tests",
+    "ruff",
+    "mypy",
+    "pytest",
+    "coverage",
+)
 REQUIRED_SECURITY_CHECKS = ("yaml", "paths", "inputs", "logs")
 REVIEW_COMMAND_TOKENS = {
     "unit-tests": "pytest",
@@ -21,20 +33,28 @@ REVIEW_COMMAND_TOKENS = {
     "ruff": "ruff",
     "mypy": "mypy",
     "pytest": "pytest",
+    "coverage": "--cov-fail-under=80",
 }
 SENSITIVE_LOG_PATTERNS = (
+    (
+        re.compile(r"(?i)\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]+"),
+        "[REDACTED_AUTHORIZATION]",
+    ),
+    (
+        re.compile(
+            r'(?i)(["\']?(?:api[_-]?key|authorization|password|secret|token)["\']?\s*[:=]\s*["\']?)([^"\'\s,;}\]]+)'
+        ),
+        r"\1[REDACTED]",
+    ),
     (
         re.compile(
             r"(?i)(\b(?:api[_-]?key|authorization|password|secret|token)\b\s*[:=]\s*)[^\s,;]+"
         ),
         r"\1[REDACTED]",
     ),
-    (
-        re.compile(r"(?i)\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]+"),
-        "[REDACTED_AUTHORIZATION]",
-    ),
     (re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"), "[REDACTED_EMAIL]"),
 )
+CRITERION_EVIDENCE_RE = re.compile(r"^[^:\r\n]+:\d+(?:-\d+)?(?:\s.*)?$")
 
 
 class AgentRole(StrEnum):
@@ -122,6 +142,36 @@ class ReviewFinding:
 
 
 @dataclass(frozen=True)
+class CompletionCriterionReview:
+    """One code-review result mapped to one completion criterion."""
+
+    number: int
+    status: str
+    evidence: str
+    recommendation: str = ""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.number, int) or isinstance(self.number, bool) or self.number < 1:
+            raise ValueError("criterion number must be a positive integer")
+        if self.status not in {"pass", "fail"}:
+            raise ValueError("criterion status must be pass or fail")
+        if not isinstance(self.evidence, str) or not self.evidence.strip():
+            raise ValueError("criterion evidence must be a non-empty string")
+        if not CRITERION_EVIDENCE_RE.fullmatch(self.evidence.strip()):
+            raise ValueError("criterion evidence must include path:line")
+        if self.status == "fail" and (
+            not isinstance(self.recommendation, str) or not self.recommendation.strip()
+        ):
+            raise ValueError("failed criterion requires a recommendation")
+        object.__setattr__(self, "evidence", sanitize_log(self.evidence, max_length=2000))
+        object.__setattr__(
+            self,
+            "recommendation",
+            sanitize_log(self.recommendation, max_length=2000),
+        )
+
+
+@dataclass(frozen=True)
 class AgentRequest:
     """A constrained request sent by the main session to one sub-agent."""
 
@@ -165,6 +215,7 @@ class AgentResult:
     summary: str
     changed_files: tuple[str, ...] = ()
     findings: tuple[ReviewFinding, ...] = ()
+    criteria_reviews: tuple[CompletionCriterionReview, ...] = ()
     validation: tuple[CheckResult, ...] = ()
     security_checks: tuple[CheckResult, ...] = ()
     external_behavior_verified: bool = False
@@ -183,6 +234,8 @@ class AgentResult:
         object.__setattr__(self, "changed_files", validate_relative_paths(self.changed_files))
         if not all(isinstance(item, ReviewFinding) for item in self.findings):
             raise ValueError("findings must contain ReviewFinding values")
+        if not all(isinstance(item, CompletionCriterionReview) for item in self.criteria_reviews):
+            raise ValueError("criteria_reviews must contain CompletionCriterionReview values")
         if not all(isinstance(item, CheckResult) for item in self.validation):
             raise ValueError("validation must contain CheckResult values")
         if not all(isinstance(item, CheckResult) for item in self.security_checks):
@@ -220,6 +273,10 @@ class AgentResult:
             findings=tuple(
                 _finding_from_payload(item)
                 for item in _sequence(payload.get("findings", ()), "findings")
+            ),
+            criteria_reviews=tuple(
+                _criteria_review_from_payload(item)
+                for item in _sequence(payload.get("criteria_reviews", ()), "criteria_reviews")
             ),
             validation=tuple(
                 _check_from_payload(item)
@@ -279,6 +336,7 @@ class PipelineResult:
     commit_sha: str | None = None
     errors: tuple[str, ...] = ()
     events: tuple[str, ...] = ()
+    completion_conditions: tuple[str, ...] = ()
 
 
 class AgentRunner(Protocol):
@@ -310,6 +368,94 @@ def validate_phase_and_step(phase: str, step: int, step_name: str) -> None:
         raise ValueError("step_name must be a kebab-case slug")
 
 
+def validate_completion_conditions(
+    conditions: Sequence[str], *, confirmed: bool
+) -> tuple[str, ...]:
+    """Validate the initial ten-condition draft or a confirmed variable-size list."""
+
+    if not isinstance(confirmed, bool):
+        raise ValueError("confirmed must be boolean")
+    if isinstance(conditions, (str, bytes)) or not isinstance(conditions, Sequence):
+        raise ValueError("completion conditions must be a sequence of strings")
+    normalized: list[str] = []
+    seen: set[str] = set()
+    total_length = 0
+    for condition in conditions:
+        if not isinstance(condition, str):
+            raise ValueError("completion conditions must contain strings")
+        value = condition.strip()
+        if not value:
+            raise ValueError("completion condition must be non-empty")
+        if "\n" in value or "\r" in value:
+            raise ValueError("completion condition must be one line")
+        if any(ord(character) < 32 or ord(character) == 127 for character in value):
+            raise ValueError("completion condition contains a control character")
+        if len(value) > 2000:
+            raise ValueError("completion condition is too long")
+        total_length += len(value.encode("utf-8"))
+        if total_length > MAX_COMPLETION_CONDITIONS_LENGTH:
+            raise ValueError("completion conditions are too large")
+        if value in seen:
+            raise ValueError("completion conditions must be unique")
+        seen.add(value)
+        normalized.append(value)
+
+    if len(normalized) > MAX_COMPLETION_CONDITIONS:
+        raise ValueError(f"completion conditions cannot exceed {MAX_COMPLETION_CONDITIONS} items")
+    if confirmed and not normalized:
+        raise ValueError("confirmed completion conditions must not be empty")
+    if not confirmed and len(normalized) != INITIAL_COMPLETION_CONDITION_COUNT:
+        raise ValueError(
+            "unconfirmed completion conditions must contain exactly "
+            f"{INITIAL_COMPLETION_CONDITION_COUNT} items"
+        )
+    return tuple(normalized)
+
+
+def save_completion_criteria(
+    root: Path, relative_path: str, conditions: Sequence[str]
+) -> Path:
+    """Write confirmed criteria to one safe Markdown path under the workspace."""
+
+    if not isinstance(root, Path):
+        raise ValueError("root must be a Path")
+    normalized_conditions = validate_completion_conditions(conditions, confirmed=True)
+    if not isinstance(relative_path, str) or not relative_path.lower().endswith(".md"):
+        raise ValueError("completion criteria path must be a Markdown file")
+    normalized_path = validate_paths_under_root(root, (relative_path,))[0]
+    target = root.resolve() / normalized_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(render_completion_criteria(normalized_conditions), encoding="utf-8")
+    return target
+
+
+def render_completion_criteria(conditions: Sequence[str]) -> str:
+    """Render validated confirmed criteria deterministically."""
+
+    normalized_conditions = validate_completion_conditions(conditions, confirmed=True)
+    return (
+        "# Completion Criteria\n\n"
+        f"현재 확정 조건 수: {len(normalized_conditions)}\n\n"
+        + "\n".join(f"- [ ] {condition}" for condition in normalized_conditions)
+        + "\n"
+    )
+
+
+def validate_completion_reviews(
+    reviews: Sequence[CompletionCriterionReview], conditions: Sequence[str]
+) -> None:
+    """Require exactly one pass/fail review with evidence for every condition."""
+
+    expected = set(range(1, len(conditions) + 1))
+    if len(reviews) != len(expected):
+        raise ReviewContractError(
+            f"code review must report {len(expected)} completion criteria"
+        )
+    numbers = [review.number for review in reviews]
+    if set(numbers) != expected or len(numbers) != len(set(numbers)):
+        raise ReviewContractError("code review criteria numbers must match 1..N exactly")
+
+
 def validate_relative_paths(paths: Sequence[str]) -> tuple[str, ...]:
     """Return canonical relative paths and reject traversal or absolute paths."""
 
@@ -323,6 +469,7 @@ def validate_relative_paths(paths: Sequence[str]) -> tuple[str, ...]:
         normalized = raw_path.replace("\\", "/")
         if (
             "\x00" in normalized
+            or any(ord(character) < 32 or ord(character) == 127 for character in normalized)
             or normalized.startswith(("/", "~"))
             or re.match(r"^[A-Za-z]:", normalized)
             or normalized.endswith("/")
@@ -369,7 +516,9 @@ def sanitize_log(value: str, *, max_length: int = 4000) -> str:
     return redacted[: max_length - 1] + "…"
 
 
-def validate_review_result(result: AgentResult) -> None:
+def validate_review_result(
+    result: AgentResult, *, completion_conditions: Sequence[str] = ()
+) -> None:
     """Validate the code-review/test-agent contract without deciding findings."""
 
     errors: list[str] = []
@@ -379,6 +528,7 @@ def validate_review_result(result: AgentResult) -> None:
         errors.append("review agent reported a commit")
     if result.changed_files:
         errors.append("review agent changed files")
+    errors.extend(_check_name_errors(result.validation, REQUIRED_REVIEW_CHECKS, "review"))
     checks = {check.name: check for check in result.validation}
     for required in REQUIRED_REVIEW_CHECKS:
         check = checks.get(required)
@@ -393,6 +543,11 @@ def validate_review_result(result: AgentResult) -> None:
                 errors.append(f"review command for {required} did not execute {expected_token}")
     if not result.external_behavior_verified:
         errors.append("review did not verify external behavior")
+    if result.role == AgentRole.CODE_REVIEW and completion_conditions:
+        try:
+            validate_completion_reviews(result.criteria_reviews, completion_conditions)
+        except ReviewContractError as exc:
+            errors.append(str(exc))
     if errors:
         raise ReviewContractError("; ".join(errors))
 
@@ -430,6 +585,7 @@ def validate_security_result(result: AgentResult) -> None:
         errors.append("security review agent reported a commit")
     if result.changed_files:
         errors.append("security review agent changed files")
+    errors.extend(_check_name_errors(result.security_checks, REQUIRED_SECURITY_CHECKS, "security"))
     checks = {check.name: check for check in result.security_checks}
     for required in REQUIRED_SECURITY_CHECKS:
         check = checks.get(required)
@@ -447,6 +603,20 @@ def _sequence(value: Any, name: str) -> Sequence[Any]:
     if not isinstance(value, (list, tuple)):
         raise ValueError(f"{name} must be a list")
     return value
+
+
+def _check_name_errors(
+    checks: Sequence[CheckResult], required: Sequence[str], label: str
+) -> list[str]:
+    names = [check.name for check in checks]
+    duplicates = sorted(name for name, count in Counter(names).items() if count > 1)
+    unknown = sorted(set(names) - set(required))
+    errors: list[str] = []
+    if duplicates:
+        errors.append(f"{label} checks contain duplicates: {', '.join(duplicates)}")
+    if unknown:
+        errors.append(f"{label} checks contain unknown names: {', '.join(unknown)}")
+    return errors
 
 
 def _string_tuple(value: Any, name: str) -> tuple[str, ...]:
@@ -477,6 +647,19 @@ def _finding_from_payload(value: Any) -> ReviewFinding:
         detail=_string_value(value.get("detail"), "finding.detail"),
         recommendation=_string_value(value.get("recommendation"), "finding.recommendation"),
         blocking=_boolean_value(value.get("blocking", True), "finding.blocking"),
+    )
+
+
+def _criteria_review_from_payload(value: Any) -> CompletionCriterionReview:
+    if not isinstance(value, Mapping):
+        raise ValueError("criterion review must be an object")
+    return CompletionCriterionReview(
+        number=value.get("number"),
+        status=_string_value(value.get("status"), "criterion_review.status"),
+        evidence=_string_value(value.get("evidence"), "criterion_review.evidence"),
+        recommendation=_string_value(
+            value.get("recommendation", ""), "criterion_review.recommendation"
+        ),
     )
 
 

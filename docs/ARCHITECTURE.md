@@ -31,5 +31,6 @@ Step 실행은 메인 에이전트가 오케스트레이션하고, 역할별 wor
 - `scripts/step_prompts.py`: 구현·코드 리뷰·테스트·보안 리뷰 worker의 역할과 금지사항
 - `scripts/step_pipeline.py`: 구현 → code-review/test 병렬 실행 → security-review → 메인 커밋 → PR CI → 병합 순서와 재시도
 - `tests/test_step_pipeline.py`: 실패 피드백, read-only 위반, 경로 traversal, 로그 정제, CI 실패 재작업 계약 테스트
+- 완료 조건: 메인 세션이 확인 전 10개 초안을 제시하고, 파이프라인은 최신 초안을 확인 전에는 실행하지 않는다. 확인 후 최종 `N`개를 `docs/completion-criteria.md`에 저장한다. 구현 worker와 code-review worker prompt에 같은 조건을 전달하며, code-review 결과는 조건 1~`N`을 각각 `pass/fail`·path:line 근거로 보고해야 한다. 실패 조건, 조건 파일 변조, 미보고 workspace 변경, Git metadata 변경은 commit·merge를 막고 다음 구현 시도에 피드백으로 전달한다. 리뷰 계약은 `pytest --cov --cov-fail-under=80` 실행도 요구한다.
 
 리뷰 worker는 파일을 수정하거나 커밋하지 않으며, 모든 blocking finding은 구현 worker의 다음 시도에 전달한다. 메인 에이전트는 코드·메타데이터 커밋과 PR 병합만 담당한다.
