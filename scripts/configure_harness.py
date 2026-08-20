@@ -15,6 +15,21 @@ VALIDATION_CONFIG = {
     "mode": "language-neutral",
     "profiles": [],
     "commands": [],
+    "stopChecks": [],
+    "reviewChecks": {
+        "code-review": [],
+        "test-review": [],
+    },
+    "stepPolicies": {
+        "feature": "required",
+        "bugfix": "regression",
+        "refactor": "optional",
+        "docs": "none",
+        "ci": "none",
+        "config": "none",
+    },
+    "reviewMutationIgnore": [],
+    "maxCompletionConditions": 100,
     "checks": {"docs": True, "deploy": True, "phase": True},
 }
 

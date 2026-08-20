@@ -26,14 +26,18 @@ run_hook() {
   )
 }
 
-write_package_json() {
-  cat > "$TMP_DIR/package.json" <<'JSON'
+write_harness_config() {
+  mkdir -p "$TMP_DIR/.harness"
+  cat > "$TMP_DIR/.harness/validation.json" <<'JSON'
 {
-  "scripts": {
-    "lint": "echo lint",
-    "build": "echo build",
-    "test": "echo test"
-  }
+  "schemaVersion": 1,
+  "mode": "profile",
+  "profiles": ["node"],
+  "commands": [
+    {"name": "lint", "command": ["npm", "run", "lint"], "reason": "lint", "roles": ["stop"]},
+    {"name": "test", "command": ["npm", "run", "test"], "reason": "test", "roles": ["stop"]}
+  ],
+  "stopChecks": ["lint", "test"]
 }
 JSON
 }
@@ -53,7 +57,7 @@ SH
 }
 
 assert_ignores_non_commit() {
-  write_package_json
+  write_harness_config
   write_fake_npm pass
   local output
   output="$(run_hook "npm run build")"
@@ -61,7 +65,7 @@ assert_ignores_non_commit() {
 }
 
 assert_allows_without_package_json() {
-  rm -f "$TMP_DIR/package.json"
+  rm -f "$TMP_DIR/.harness/validation.json"
   write_fake_npm fail-test
   local output
   output="$(run_hook "git commit -m test")"
@@ -69,7 +73,7 @@ assert_allows_without_package_json() {
 }
 
 assert_runs_all_scripts_before_commit() {
-  write_package_json
+  write_harness_config
   write_fake_npm pass
   local output
   output="$(run_hook "git commit -m test")"
@@ -77,7 +81,7 @@ assert_runs_all_scripts_before_commit() {
 }
 
 assert_blocks_when_validation_fails() {
-  write_package_json
+  write_harness_config
   write_fake_npm fail-test
   local output
   output="$(run_hook "git commit -m test")"

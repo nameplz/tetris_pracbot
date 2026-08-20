@@ -8,14 +8,18 @@ import json
 import re
 import subprocess
 import sys
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 
 PHASE_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
-STUCK_AFTER_SECONDS = 30 * 60
-MAX_STUCK_ATTEMPTS = 3
+STATUS_UPDATE_INTERVAL_SECONDS = 60
+STUCK_AFTER_SECONDS = 1800
+MAX_STUCK_RETRIES = 3
+# Compatibility alias for callers using the original name.
+MAX_STUCK_ATTEMPTS = MAX_STUCK_RETRIES
+HEARTBEAT_STATUSES = frozenset({"running", "completed", "stuck", "error", "blocked"})
 
 
 class PhaseWorktreeError(RuntimeError):
@@ -105,9 +109,45 @@ def write_heartbeat(
     attempt: int,
     status: str,
     message: str | None = None,
+    started_at: datetime | str | None = None,
+    now: datetime | str | None = None,
+    progress: str | None = None,
+    stuck_retry: int = 0,
+    pipeline_attempt: int | None = None,
+    status_update_interval_seconds: int = STATUS_UPDATE_INTERVAL_SECONDS,
+    stuck_after_seconds: int = STUCK_AFTER_SECONDS,
+    max_stuck_retries: int = MAX_STUCK_RETRIES,
 ) -> Path:
+    """Persist one immutable runtime state snapshot for an implementation attempt."""
+
     phase = validate_phase_name(phase)
-    now = datetime.now(UTC).isoformat()
+    if not isinstance(status, str) or status not in HEARTBEAT_STATUSES:
+        raise PhaseWorktreeError(f"invalid heartbeat status: {status}")
+    if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1:
+        raise PhaseWorktreeError("attempt must be a positive integer")
+    for name, value in (("stuck_retry", stuck_retry),):
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise PhaseWorktreeError(f"{name} must be a non-negative integer")
+    for name, value in (
+        ("status_update_interval_seconds", status_update_interval_seconds),
+        ("stuck_after_seconds", stuck_after_seconds),
+        ("max_stuck_retries", max_stuck_retries),
+    ):
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise PhaseWorktreeError(f"{name} must be positive")
+
+    current = _as_utc_datetime(now)
+    started = _as_utc_datetime(started_at) if started_at is not None else current
+    if started > current:
+        raise PhaseWorktreeError("started_at cannot be later than updated_at")
+    elapsed_seconds = int((current - started).total_seconds())
+    progress_text = progress if progress is not None else message or ""
+    if not isinstance(progress_text, str):
+        raise PhaseWorktreeError("progress must be a string")
+    pipeline_number = pipeline_attempt if pipeline_attempt is not None else attempt
+    if not isinstance(pipeline_number, int) or isinstance(pipeline_number, bool) or pipeline_number < 1:
+        raise PhaseWorktreeError("pipeline_attempt must be a positive integer")
+
     directory = root / ".harness" / "runtime" / phase
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"step{step}-attempt{attempt}.json"
@@ -115,14 +155,67 @@ def write_heartbeat(
         "phase": phase,
         "step": step,
         "attempt": attempt,
+        "pipeline_attempt": pipeline_number,
         "status": status,
         "message": message,
-        "updated_at": now,
-        "stuck_after_seconds": STUCK_AFTER_SECONDS,
-        "max_stuck_attempts": MAX_STUCK_ATTEMPTS,
+        "progress": progress_text,
+        "started_at": started.isoformat(),
+        "updated_at": current.isoformat(),
+        "elapsed_seconds": elapsed_seconds,
+        "status_update_interval_seconds": status_update_interval_seconds,
+        "stuck_after_seconds": stuck_after_seconds,
+        "stuck_retry": stuck_retry,
+        "stuck_retries": stuck_retry,
+        "max_stuck_retries": max_stuck_retries,
+        "max_stuck_attempts": max_stuck_retries,
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return path
+
+
+def is_stuck(
+    *,
+    started_at: datetime | str,
+    now: datetime | str,
+    status: str,
+    stuck_after_seconds: int = STUCK_AFTER_SECONDS,
+) -> bool:
+    """Return true only when a non-finished implementation exceeds its start timeout."""
+
+    if status != "running":
+        return False
+    if not isinstance(stuck_after_seconds, int) or isinstance(stuck_after_seconds, bool) or stuck_after_seconds < 0:
+        raise PhaseWorktreeError("stuck_after_seconds must be a non-negative integer")
+    started = _as_utc_datetime(started_at)
+    current = _as_utc_datetime(now)
+    return current >= started and (current - started).total_seconds() >= stuck_after_seconds
+
+
+def next_stuck_state(stuck_retries: int, *, max_stuck_retries: int = MAX_STUCK_RETRIES) -> tuple[str, int]:
+    """Return next stuck lifecycle state without changing pipeline retry count."""
+
+    if not isinstance(stuck_retries, int) or isinstance(stuck_retries, bool) or stuck_retries < 0:
+        raise PhaseWorktreeError("stuck_retries must be a non-negative integer")
+    if not isinstance(max_stuck_retries, int) or isinstance(max_stuck_retries, bool) or max_stuck_retries < 1:
+        raise PhaseWorktreeError("max_stuck_retries must be positive")
+    if stuck_retries >= max_stuck_retries:
+        return "error", stuck_retries
+    return "stuck", stuck_retries + 1
+
+
+def _as_utc_datetime(value: datetime | str | None) -> datetime:
+    if value is None:
+        return datetime.now(timezone.utc)
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError as exc:
+            raise PhaseWorktreeError("timestamp must be ISO-8601") from exc
+    if not isinstance(value, datetime):
+        raise PhaseWorktreeError("timestamp must be datetime or ISO-8601 string")
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def validate_phase(root: Path, phase: str) -> None:

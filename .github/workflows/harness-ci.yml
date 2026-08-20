@@ -120,6 +120,9 @@ jobs:
       - name: Run tests
         run: python3 -m unittest discover -s tests
 
+      - name: Run hook contract test
+        run: bash .codex/hooks/pre-commit-validation.test.sh
+
       - name: Validate skeleton
         run: python3 scripts/validate_project.py --root .
 

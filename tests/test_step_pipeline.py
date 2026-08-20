@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import sys
 import threading
+from datetime import UTC, datetime, timedelta
 from collections import defaultdict
+import json
 from pathlib import Path
+import subprocess
 from tempfile import TemporaryDirectory
 import unittest
 
@@ -24,6 +27,7 @@ from scripts.step_pipeline import (  # noqa: E402
     ReviewContractError,
     ReviewFinding,
     StepPipeline,
+    load_completion_criteria,
     sanitize_log,
     validate_paths_under_root,
     validate_relative_paths,
@@ -60,6 +64,7 @@ def run_pipeline(
     step_name: str,
     max_attempts: int = 3,
     conditions: tuple[str, ...] = COMPLETION_CONDITIONS,
+    step_kind: str = "feature",
 ) -> PipelineResult:
     with TemporaryDirectory() as temp:
         return StepPipeline(
@@ -70,6 +75,7 @@ def run_pipeline(
             step_name=step_name,
             completion_conditions=conditions,
             conditions_confirmed=True,
+            step_kind=step_kind,
         )
 
 
@@ -182,8 +188,9 @@ class StepPipelineTests(unittest.TestCase):
         security_request = next(
             request for request in runner.requests if request.role == AgentRole.SECURITY_REVIEW
         )
-        self.assertIn("Ruff, Mypy, Pytest", code_request.prompt)
-        self.assertIn("--cov-fail-under=80", code_request.prompt)
+        self.assertIn("No project validation checks configured", code_request.prompt)
+        self.assertNotIn("Ruff, Mypy, Pytest", code_request.prompt)
+        self.assertNotIn("--cov-fail-under=80", code_request.prompt)
         self.assertIn("yaml, paths, inputs, and logs", security_request.prompt)
 
     def test_failed_review_retries_implementation_and_all_reviews(self) -> None:
@@ -313,7 +320,8 @@ class StepPipelineTests(unittest.TestCase):
         self.assertEqual([], actions.commit_calls)
         self.assertTrue(any("test file" in error for error in result.errors))
 
-    def test_review_contract_requires_external_behavior_and_all_validation_commands(self) -> None:
+    def test_review_contract_requires_external_behavior_and_profile_commands(self) -> None:
+        required_checks = REVIEW_CHECKS
         with self.assertRaises(ReviewContractError):
             validate_review_result(
                 AgentResult(
@@ -322,8 +330,20 @@ class StepPipelineTests(unittest.TestCase):
                     summary="incomplete",
                     validation=(CheckResult(name="pytest", command=("pytest",), passed=True),),
                     external_behavior_verified=False,
-                )
+                ),
+                review_checks=required_checks,
             )
+
+        validate_review_result(
+            AgentResult(
+                role=AgentRole.CODE_REVIEW,
+                status=AgentStatus.PASSED,
+                summary="code contract reviewed",
+                validation=required_checks,
+                external_behavior_verified=False,
+            ),
+            review_checks=required_checks,
+        )
 
         incomplete_commands = list(REVIEW_CHECKS)
         incomplete_commands[-1] = CheckResult(name="ruff", command=("echo",), passed=True)
@@ -335,7 +355,8 @@ class StepPipelineTests(unittest.TestCase):
                     summary="wrong command",
                     validation=tuple(incomplete_commands),
                     external_behavior_verified=True,
-                )
+                ),
+                review_checks=required_checks,
             )
 
         duplicate_checks = REVIEW_CHECKS + (REVIEW_CHECKS[0],)
@@ -347,7 +368,8 @@ class StepPipelineTests(unittest.TestCase):
                     summary="duplicate checks",
                     validation=duplicate_checks,
                     external_behavior_verified=True,
-                )
+                ),
+                review_checks=required_checks,
             )
 
         unknown_checks = REVIEW_CHECKS + (
@@ -361,7 +383,8 @@ class StepPipelineTests(unittest.TestCase):
                     summary="unknown checks",
                     validation=unknown_checks,
                     external_behavior_verified=True,
-                )
+                ),
+                review_checks=required_checks,
             )
 
     def test_worker_payload_is_validated_at_the_boundary(self) -> None:
@@ -488,6 +511,114 @@ class StepPipelineTests(unittest.TestCase):
             self.assertEqual([], actions.commit_calls)
             self.assertTrue(any("modified" in error for error in result.errors))
 
+    def test_workspace_snapshot_blocks_untracked_review_file(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+
+            class UntrackedMutatingRunner(RecordingRunner):
+                def run(self, request: AgentRequest) -> AgentResult:
+                    if request.role == AgentRole.TEST:
+                        (root / "review-generated.txt").write_text("unexpected", encoding="utf-8")
+                    return super().run(request)
+
+            runner = UntrackedMutatingRunner(
+                {
+                    AgentRole.IMPLEMENTATION: [implementation_result()],
+                    AgentRole.CODE_REVIEW: [review_result(AgentRole.CODE_REVIEW)],
+                    AgentRole.TEST: [review_result(AgentRole.TEST)],
+                    AgentRole.SECURITY_REVIEW: [security_result()],
+                }
+            )
+            actions = RecordingActions()
+
+            result = StepPipeline(runner=runner, actions=actions, root=root, max_attempts=1).run(
+                phase="0-mvp",
+                step=20,
+                step_name="untracked-readonly",
+                completion_conditions=COMPLETION_CONDITIONS,
+                conditions_confirmed=True,
+            )
+
+            self.assertEqual(PipelineStatus.ERROR, result.status)
+            self.assertEqual([], actions.commit_calls)
+            self.assertTrue(any("workspace" in error for error in result.errors))
+
+    def test_configured_generated_artifact_is_ignored_for_review_mutation(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / ".harness").mkdir()
+            (root / ".harness/validation.json").write_text(
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "mode": "profile",
+                        "reviewMutationIgnore": ["coverage/"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            class GeneratedArtifactRunner(RecordingRunner):
+                def run(self, request: AgentRequest) -> AgentResult:
+                    if request.role == AgentRole.CODE_REVIEW:
+                        (root / "coverage").mkdir()
+                        (root / "coverage/report.txt").write_text("generated", encoding="utf-8")
+                    return super().run(request)
+
+            runner = GeneratedArtifactRunner(
+                {
+                    AgentRole.IMPLEMENTATION: [implementation_result()],
+                    AgentRole.CODE_REVIEW: [review_result(AgentRole.CODE_REVIEW)],
+                    AgentRole.TEST: [review_result(AgentRole.TEST)],
+                    AgentRole.SECURITY_REVIEW: [security_result()],
+                }
+            )
+            actions = RecordingActions()
+
+            result = StepPipeline(runner=runner, actions=actions, root=root).run(
+                phase="0-mvp",
+                step=21,
+                step_name="ignored-artifact",
+                completion_conditions=COMPLETION_CONDITIONS,
+                conditions_confirmed=True,
+            )
+
+            self.assertEqual(PipelineStatus.COMPLETED, result.status)
+            self.assertEqual(1, len(actions.commit_calls))
+
+    def test_git_metadata_mutation_blocks_review(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+
+            class GitMutatingRunner(RecordingRunner):
+                def run(self, request: AgentRequest) -> AgentResult:
+                    if request.role == AgentRole.CODE_REVIEW:
+                        (root / ".git/HEAD").write_text("ref: refs/heads/evil\n", encoding="utf-8")
+                    return super().run(request)
+
+            runner = GitMutatingRunner(
+                {
+                    AgentRole.IMPLEMENTATION: [implementation_result()],
+                    AgentRole.CODE_REVIEW: [review_result(AgentRole.CODE_REVIEW)],
+                    AgentRole.TEST: [review_result(AgentRole.TEST)],
+                    AgentRole.SECURITY_REVIEW: [security_result()],
+                }
+            )
+            actions = RecordingActions()
+
+            result = StepPipeline(runner=runner, actions=actions, root=root, max_attempts=1).run(
+                phase="0-mvp",
+                step=22,
+                step_name="git-readonly",
+                completion_conditions=COMPLETION_CONDITIONS,
+                conditions_confirmed=True,
+            )
+
+            self.assertEqual(PipelineStatus.ERROR, result.status)
+            self.assertEqual([], actions.commit_calls)
+            self.assertTrue(any("git metadata" in error for error in result.errors))
+
     def test_pipeline_reviews_and_commits_unreported_workspace_changes(self) -> None:
         with TemporaryDirectory() as temp:
             root = Path(temp)
@@ -581,19 +712,35 @@ class StepPipelineTests(unittest.TestCase):
             self.assertEqual([], runner.requests)
             self.assertFalse((root / "docs/completion-criteria.md").exists())
 
-    def test_unconfirmed_conditions_require_exactly_ten(self) -> None:
+    def test_unconfirmed_conditions_allow_one_three_and_ten(self) -> None:
         runner = RecordingRunner({})
         actions = RecordingActions()
-        for count in (9, 11):
+        for count in (1, 3, 10):
             with self.subTest(count=count):
-                with self.assertRaises(ValueError):
-                    StepPipeline(runner=runner, actions=actions).run(
+                result = StepPipeline(runner=runner, actions=actions).run(
                         phase="0-mvp",
                         step=8,
                         step_name="criteria",
                         completion_conditions=tuple(f"criterion {i}" for i in range(count)),
                         conditions_confirmed=False,
                     )
+                self.assertEqual(PipelineStatus.BLOCKED, result.status)
+
+    def test_completion_condition_maximum_is_configurable(self) -> None:
+        runner = RecordingRunner({})
+        actions = RecordingActions()
+        with self.assertRaises(ValueError):
+            StepPipeline(
+                runner=runner,
+                actions=actions,
+                max_completion_conditions=2,
+            ).run(
+                phase="0-mvp",
+                step=8,
+                step_name="criteria",
+                completion_conditions=("one", "two", "three"),
+                conditions_confirmed=True,
+            )
 
     def test_latest_draft_can_change_before_confirmation_but_confirmation_must_match(self) -> None:
         runner = RecordingRunner({})
@@ -619,15 +766,15 @@ class StepPipelineTests(unittest.TestCase):
             self.assertEqual(PipelineStatus.BLOCKED, first.status)
             self.assertEqual(PipelineStatus.BLOCKED, second.status)
             self.assertEqual(revised, second.completion_conditions)
-            with self.assertRaises(ValueError):
-                pipeline.run(
-                    phase="0-mvp",
-                    step=15,
-                    step_name="criteria-draft",
-                    completion_conditions=("different",),
-                    conditions_confirmed=True,
-                )
-            self.assertFalse((Path(temp) / "docs/completion-criteria.md").exists())
+            confirmed = pipeline.run(
+                phase="0-mvp",
+                step=15,
+                step_name="criteria-draft",
+                completion_conditions=("different",),
+                conditions_confirmed=True,
+            )
+            self.assertEqual(PipelineStatus.ERROR, confirmed.status)
+            self.assertTrue((Path(temp) / "docs/completion-criteria.md").exists())
 
     def test_confirmation_saves_dynamic_count_and_provides_same_conditions_to_workers(self) -> None:
         conditions = ("first criterion", "second criterion", "third criterion")
@@ -662,6 +809,7 @@ class StepPipelineTests(unittest.TestCase):
             criteria_file = root / "docs/completion-criteria.md"
             content = criteria_file.read_text(encoding="utf-8")
             self.assertEqual(PipelineStatus.COMPLETED, result.status)
+            self.assertEqual(conditions, load_completion_criteria(root))
             self.assertIn("현재 확정 조건 수: 3", content)
             for condition in conditions:
                 self.assertIn(condition, content)
@@ -765,6 +913,211 @@ class StepPipelineTests(unittest.TestCase):
         self.assertIn("src/app.py:20", implementation_requests[1].feedback)
         self.assertIn("Add externally visible behavior test", implementation_requests[1].feedback)
         self.assertEqual(1, len(actions.commit_calls))
+
+    def test_docs_step_does_not_require_test_file_change(self) -> None:
+        runner = RecordingRunner(
+            {
+                AgentRole.IMPLEMENTATION: [implementation_result(changed_files=("docs/guide.md",))],
+                AgentRole.CODE_REVIEW: [review_result(AgentRole.CODE_REVIEW)],
+                AgentRole.TEST: [review_result(AgentRole.TEST)],
+                AgentRole.SECURITY_REVIEW: [security_result()],
+            }
+        )
+        actions = RecordingActions()
+
+        result = run_pipeline(
+            runner,
+            actions,
+            phase="0-mvp",
+            step=16,
+            step_name="docs",
+            step_kind="docs",
+        )
+
+        self.assertEqual(PipelineStatus.COMPLETED, result.status)
+        self.assertEqual(1, len(actions.commit_calls))
+
+    def test_profile_assigns_lint_to_code_review_and_tests_to_test_review(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / ".harness").mkdir()
+            (root / ".harness/validation.json").write_text(
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "mode": "profile",
+                        "profiles": ["node"],
+                        "commands": [
+                            {
+                                "name": "eslint",
+                                "command": ["eslint", "."],
+                                "reason": "lint",
+                                "roles": ["code-review", "stop"],
+                            },
+                            {
+                                "name": "vitest",
+                                "command": ["vitest", "run"],
+                                "reason": "tests",
+                                "roles": ["test-review", "stop"],
+                            },
+                        ],
+                        "reviewChecks": {
+                            "code-review": ["eslint"],
+                            "test-review": ["vitest"],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            review_checks = (
+                CheckResult("eslint", ("eslint", "."), True),
+            )
+            test_checks = (
+                CheckResult("vitest", ("vitest", "run"), True),
+            )
+            runner = RecordingRunner(
+                {
+                    AgentRole.IMPLEMENTATION: [implementation_result()],
+                    AgentRole.CODE_REVIEW: [
+                        AgentResult(
+                            role=AgentRole.CODE_REVIEW,
+                            status=AgentStatus.PASSED,
+                            summary="reviewed",
+                            criteria_reviews=(CompletionCriterionReview(1, "pass", "src/app.py:1"),),
+                            validation=review_checks,
+                            external_behavior_verified=True,
+                        )
+                    ],
+                    AgentRole.TEST: [
+                        AgentResult(
+                            role=AgentRole.TEST,
+                            status=AgentStatus.PASSED,
+                            summary="tested",
+                            validation=test_checks,
+                            external_behavior_verified=True,
+                        )
+                    ],
+                    AgentRole.SECURITY_REVIEW: [security_result()],
+                }
+            )
+            actions = RecordingActions()
+
+            result = StepPipeline(runner=runner, actions=actions, root=root).run(
+                phase="0-mvp",
+                step=17,
+                step_name="profile",
+                completion_conditions=COMPLETION_CONDITIONS,
+                conditions_confirmed=True,
+            )
+
+            self.assertEqual(PipelineStatus.COMPLETED, result.status)
+            code_prompt = next(
+                request.prompt for request in runner.requests if request.role == AgentRole.CODE_REVIEW
+            )
+            test_prompt = next(
+                request.prompt for request in runner.requests if request.role == AgentRole.TEST
+            )
+            self.assertIn("eslint", code_prompt)
+            self.assertNotIn("vitest", code_prompt)
+            self.assertIn("vitest", test_prompt)
+            self.assertNotIn("eslint", test_prompt)
+
+    def test_stuck_retries_are_separate_from_pipeline_attempts_and_can_end_in_error(self) -> None:
+        class AdvancingClock:
+            def __init__(self) -> None:
+                self.value = datetime(2026, 1, 1, tzinfo=UTC)
+
+            def __call__(self) -> datetime:
+                return self.value
+
+        clock = AdvancingClock()
+
+        class SlowImplementationRunner(RecordingRunner):
+            def run(self, request: AgentRequest) -> AgentResult:
+                if request.role == AgentRole.IMPLEMENTATION:
+                    clock.value += timedelta(seconds=1800)
+                    return None  # type: ignore[return-value]
+                return super().run(request)
+
+        runner = SlowImplementationRunner(
+            {
+                AgentRole.IMPLEMENTATION: [implementation_result(), implementation_result()],
+                AgentRole.CODE_REVIEW: [review_result(AgentRole.CODE_REVIEW)],
+                AgentRole.TEST: [review_result(AgentRole.TEST)],
+                AgentRole.SECURITY_REVIEW: [security_result()],
+            }
+        )
+        actions = RecordingActions()
+
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            result = StepPipeline(
+                runner=runner,
+                actions=actions,
+                root=root,
+                max_attempts=3,
+                max_stuck_retries=1,
+                clock=clock,
+            ).run(
+                phase="0-mvp",
+                step=18,
+                step_name="stuck",
+                completion_conditions=COMPLETION_CONDITIONS,
+                conditions_confirmed=True,
+            )
+            runtime = json.loads(
+                (root / ".harness/runtime/0-mvp/step18-attempt1.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(PipelineStatus.ERROR, result.status)
+        self.assertEqual(1, result.attempts)
+        self.assertEqual(1, result.stuck_retries)
+        self.assertEqual([], actions.commit_calls)
+        self.assertTrue(any("stuck" in event for event in result.events))
+        self.assertEqual("error", runtime["status"])
+
+    def test_pipeline_writes_terminal_heartbeat_and_emits_status_updates(self) -> None:
+        runner = RecordingRunner(
+            {
+                AgentRole.IMPLEMENTATION: [implementation_result()],
+                AgentRole.CODE_REVIEW: [review_result(AgentRole.CODE_REVIEW)],
+                AgentRole.TEST: [review_result(AgentRole.TEST)],
+                AgentRole.SECURITY_REVIEW: [security_result()],
+            }
+        )
+        actions = RecordingActions()
+        updates: list[str] = []
+
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            result = StepPipeline(
+                runner=runner,
+                actions=actions,
+                root=root,
+                status_update=updates.append,
+            ).run(
+                phase="0-mvp",
+                step=19,
+                step_name="heartbeat",
+                completion_conditions=COMPLETION_CONDITIONS,
+                conditions_confirmed=True,
+            )
+
+            runtime = json.loads(
+                (root / ".harness/runtime/0-mvp/step19-attempt1.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(PipelineStatus.COMPLETED, result.status)
+        self.assertEqual("completed", runtime["status"])
+        self.assertEqual(0, runtime["stuck_retry"])
+        self.assertEqual(60, runtime["status_update_interval_seconds"])
+        self.assertEqual(1800, runtime["stuck_after_seconds"])
+        self.assertGreaterEqual(len(updates), 2)
+        implementation_request = next(
+            request for request in runner.requests if request.role == AgentRole.IMPLEMENTATION
+        )
+        self.assertEqual(".harness/runtime/0-mvp/step19-attempt1.json", implementation_request.heartbeat_path)
+        self.assertEqual(1800, implementation_request.stuck_after_seconds)
 
 
 if __name__ == "__main__":

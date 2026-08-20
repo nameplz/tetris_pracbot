@@ -1,14 +1,12 @@
 # Completion Criteria
 
-현재 확정 조건 수: 10
+이 파일은 사용자 확인 후 Harness pipeline이 durable artifact로 생성한다.
 
-- [ ] 최초 제안 단계에서 조건은 정확히 10개 생성된다.
-- [ ] 확인 전 사용자는 조건 추가·삭제·수정을 요청할 수 있다.
-- [ ] 확인 전 구현 worker는 실행되지 않는다.
-- [ ] 최종 조건 수 `N`과 내용은 마지막 사용자 요구와 일치한다.
-- [ ] 사용자 확인 전 Markdown 파일은 생성·수정되지 않는다.
-- [ ] 확인 후 Markdown 파일에는 조건이 정확히 `N`개 저장된다.
-- [ ] 확인 후 조건 수 변경 요청 시 새 `N`과 내용이 파일·프롬프트·리뷰 기준에 반영된다.
-- [ ] 구현 worker prompt에 최종 `N`개 조건과 파일 경로가 포함된다.
-- [ ] code-review worker가 조건 1~`N`을 각각 `pass/fail` 및 근거로 대조한다.
-- [ ] 조건 하나라도 `fail`이면 commit·merge가 차단되고, 테스트·커버리지 80% 이상이 통과한다.
+정책:
+
+- 조건은 최소 1개다.
+- 3~10개를 권장한다.
+- 최대 개수는 `.harness/validation.json`의 `maxCompletionConditions`로 설정한다.
+- 확인 전에는 pipeline을 실행하거나 이 Markdown artifact를 생성·수정하지 않는다.
+- 확인 후 구현 worker와 Code Review worker는 같은 조건 목록을 사용한다.
+- Code Review는 조건 1..N을 정확히 한 번씩 `pass/fail` 및 `path:line` 근거로 평가한다.

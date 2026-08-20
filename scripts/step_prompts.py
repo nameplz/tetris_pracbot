@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from scripts.harness_validation import HarnessCommand
 from scripts.step_contracts import (
     DEFAULT_COMPLETION_CRITERIA_PATH,
     AgentRole,
@@ -24,6 +25,8 @@ def implementation_prompt(
     feedback: str,
     completion_conditions: Sequence[str] = (),
     criteria_path: str = DEFAULT_COMPLETION_CRITERIA_PATH,
+    step_kind: str = "feature",
+    test_requirement: str = "required",
 ) -> str:
     safe_spec = sanitize_log(step_spec, max_length=12000)
     safe_feedback = sanitize_log(feedback) if feedback else ""
@@ -32,10 +35,18 @@ def implementation_prompt(
 
 Phase: {phase}
 Step: {step} / {step_name}
+Step kind: {step_kind}
+Test-change policy: {test_requirement}
 
-Implement the step specification below. Write the code and add or update tests first,
-then run the step acceptance commands. You may edit implementation and test files, but
+Implement the step specification below. Follow the configured test-change policy, then
+run the project-defined acceptance commands. You may edit implementation and test files, but
 do not commit, push, or merge. Return changed relative paths and validation results.
+
+At implementation start, initialize runtime heartbeat. Keep it updated about every 60
+seconds with current progress and stop it with a terminal state when the attempt ends.
+The attempt has a 30-minute limit measured from started_at, independent of heartbeat
+updates. If it exceeds the limit, report stuck so the main session can start a new worker;
+do not confuse that with review/CI pipeline retry.
 
 Read the confirmed completion criteria file before writing. Preserve every criterion.
 {criteria}
@@ -59,6 +70,7 @@ def review_prompt(
     feedback: str,
     completion_conditions: Sequence[str] = (),
     criteria_path: str = DEFAULT_COMPLETION_CRITERIA_PATH,
+    review_checks: Sequence[HarnessCommand] = (),
 ) -> str:
     role_label = "code review" if role == AgentRole.CODE_REVIEW else "test review"
     safe_spec = sanitize_log(step_spec, max_length=12000)
@@ -73,14 +85,17 @@ Changed files: {", ".join(changed_files) or "none"}
 Completion criteria:
 {criteria}
 
+Project validation checks assigned to this reviewer:
+{_checks_text(review_checks)}
+
 Read the step specification and every changed file. Compare the specification with the
 actual behavior, identify missing requirements, and do not edit files or commit. For code
 review, compare completion criteria 1 through N one by one and report each as pass or fail
 with evidence path:line. Give a concrete recommendation for every failed criterion. Directly
-run unit tests and integration tests, then run Ruff, Mypy, Pytest, and
-`pytest --cov --cov-fail-under=80`. Verify that tests exercise externally observable
-behavior rather than implementation details. Report every failure with its cause and a
-concrete recommendation for the implementation agent.
+run every configured check assigned to this reviewer. Code review owns specification,
+architecture, ADR, criteria, logic, contracts, maintainability, scope, and only its
+assigned checks. Test review owns externally observable behavior, regression, coverage,
+and only its assigned checks. Do not invent tools that are not in the project profile.
 
 Step specification:
 {safe_spec}
@@ -157,3 +172,12 @@ def _criteria_text(conditions: Sequence[str], criteria_path: str) -> str:
         for number, condition in enumerate(conditions, start=1)
     )
     return f"File: {criteria_path}\n{numbered}"
+
+
+def _checks_text(checks: Sequence[HarnessCommand]) -> str:
+    if not checks:
+        return "No project validation checks configured. Do not substitute language-specific tools."
+    return "\n".join(
+        f"- {check.name}: {' '.join(check.command)} — {sanitize_log(check.reason, max_length=1000)}"
+        for check in checks
+    )

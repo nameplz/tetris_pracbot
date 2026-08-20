@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +20,8 @@ class HarnessCommand:
     name: str
     command: tuple[str, ...]
     reason: str
+    roles: tuple[str, ...] = ("validation", "stop")
+    required: bool = True
 
 
 @dataclass(frozen=True)
@@ -29,6 +31,11 @@ class ValidationConfig:
     profiles: tuple[str, ...]
     commands: tuple[HarnessCommand, ...]
     checks: dict[str, bool]
+    stop_checks: tuple[HarnessCommand, ...] = ()
+    review_checks: dict[str, tuple[HarnessCommand, ...]] = field(default_factory=dict)
+    step_policies: dict[str, str] = field(default_factory=dict)
+    review_mutation_ignore: tuple[str, ...] = ()
+    max_completion_conditions: int = 100
 
 
 @dataclass
@@ -51,6 +58,26 @@ DEFAULT_CONFIG = ValidationConfig(
     profiles=(),
     commands=(),
     checks=DEFAULT_CHECKS.copy(),
+)
+
+DEFAULT_STEP_POLICIES = {
+    "feature": "required",
+    "bugfix": "regression",
+    "refactor": "optional",
+    "docs": "none",
+    "ci": "none",
+    "config": "none",
+    "dependency": "optional",
+    "metadata": "none",
+}
+DEFAULT_REVIEW_MUTATION_IGNORES = (
+    ".git",
+    ".harness/runtime",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    "__pycache__",
+    ".coverage",
 )
 
 DOC_FILES = ("docs/PRD.md", "docs/ARCHITECTURE.md", "docs/ADR.md")
@@ -129,17 +156,49 @@ def load_validation_config(path: Path) -> ValidationConfig:
     data = load_json(path)
     if data.get("schemaVersion") != 1:
         raise HarnessValidationError("validation schemaVersion must be 1")
-    if data.get("mode") != "language-neutral":
-        raise HarnessValidationError('validation mode must be "language-neutral"')
+    mode = data.get("mode", "language-neutral")
+    if mode not in {"language-neutral", "profile"}:
+        raise HarnessValidationError('validation mode must be "language-neutral" or "profile"')
 
     profiles = data.get("profiles", [])
     if not isinstance(profiles, list) or not all(isinstance(item, str) for item in profiles):
         raise HarnessValidationError("profiles must be a list of strings")
+    profile = data.get("profile")
+    if profile is not None:
+        if not isinstance(profile, str) or not profile.strip():
+            raise HarnessValidationError("profile must be a non-empty string")
+        profiles = [*profiles, profile]
+    profiles = _unique_strings(profiles, "profiles")
 
-    commands_raw = data.get("commands", [])
+    commands_raw = data.get("commands", data.get("validationChecks", []))
     if not isinstance(commands_raw, list):
         raise HarnessValidationError("commands must be a list")
     commands = tuple(validate_command_item(item) for item in commands_raw)
+    _ensure_unique_command_names(commands)
+    command_map = {command.name: command for command in commands}
+
+    stop_raw = data.get("stopChecks")
+    if stop_raw is None:
+        stop_checks = tuple(command for command in commands if "stop" in command.roles)
+    else:
+        stop_checks, command_map = _resolve_commands(stop_raw, command_map, "stopChecks")
+
+    review_checks: dict[str, tuple[HarnessCommand, ...]] = {}
+    review_raw = data.get("reviewChecks")
+    if review_raw is None:
+        for role in ("code-review", "test-review"):
+            review_checks[role] = tuple(
+                command for command in command_map.values() if role in command.roles
+            )
+    else:
+        if not isinstance(review_raw, dict):
+            raise HarnessValidationError("reviewChecks must be an object")
+        for role, raw_checks in review_raw.items():
+            normalized_role = _review_role_name(role)
+            resolved, command_map = _resolve_commands(
+                raw_checks, command_map, f"reviewChecks.{role}"
+            )
+            review_checks[normalized_role] = resolved
 
     checks_raw = data.get("checks", DEFAULT_CHECKS)
     if not isinstance(checks_raw, dict):
@@ -152,12 +211,27 @@ def load_validation_config(path: Path) -> ValidationConfig:
                 raise HarnessValidationError(f"checks.{name} must be boolean")
             checks[name] = value
 
+    step_policies = _load_step_policies(data.get("stepPolicies", data.get("stepValidation", {})))
+    mutation_ignore = _load_mutation_ignore(data.get("reviewMutationIgnore", ()))
+    max_completion_conditions = data.get("maxCompletionConditions", 100)
+    if (
+        not isinstance(max_completion_conditions, int)
+        or isinstance(max_completion_conditions, bool)
+        or max_completion_conditions < 1
+    ):
+        raise HarnessValidationError("maxCompletionConditions must be a positive integer")
+
     return ValidationConfig(
         schema_version=1,
-        mode="language-neutral",
+        mode=mode,
         profiles=tuple(profiles),
-        commands=commands,
+        commands=tuple(command_map.values()),
         checks=checks,
+        stop_checks=stop_checks,
+        review_checks=review_checks,
+        step_policies=step_policies,
+        review_mutation_ignore=mutation_ignore,
+        max_completion_conditions=max_completion_conditions,
     )
 
 
@@ -177,10 +251,157 @@ def validate_command_item(item: Any) -> HarnessCommand:
     if not all(isinstance(part, str) and part for part in command):
         raise HarnessValidationError("command.command must contain only non-empty strings")
 
+    roles = item.get("roles", ["validation", "stop"])
+    if not isinstance(roles, list) or not roles or not all(isinstance(role, str) and role for role in roles):
+        raise HarnessValidationError("command.roles must be a non-empty list[str]")
+    normalized_roles = _command_roles(roles)
+    required = item.get("required", True)
+    if not isinstance(required, bool):
+        raise HarnessValidationError("command.required must be boolean")
+
     reason_text = unsafe_command_reason(command)
     if reason_text:
         raise HarnessValidationError(f"Unsafe command {name}: {reason_text}")
-    return HarnessCommand(name=name, command=tuple(command), reason=reason)
+    return HarnessCommand(
+        name=name,
+        command=tuple(command),
+        reason=reason,
+        roles=normalized_roles,
+        required=required,
+    )
+
+
+def get_stop_checks(config: ValidationConfig) -> tuple[HarnessCommand, ...]:
+    """Return project-defined checks used by stop/pre-commit gates."""
+
+    return config.stop_checks
+
+
+def get_review_checks(config: ValidationConfig, role: str) -> tuple[HarnessCommand, ...]:
+    """Return only checks assigned to one reviewer role."""
+
+    return config.review_checks.get(_review_role_name(role), ())
+
+
+def step_validation_policy(config: ValidationConfig, step_kind: str) -> str:
+    if not isinstance(step_kind, str) or not step_kind.strip():
+        raise HarnessValidationError("step kind must be a non-empty string")
+    return config.step_policies.get(step_kind, DEFAULT_STEP_POLICIES.get(step_kind, "required"))
+
+
+def _resolve_commands(
+    raw_checks: Any,
+    command_map: dict[str, HarnessCommand],
+    field_name: str,
+) -> tuple[tuple[HarnessCommand, ...], dict[str, HarnessCommand]]:
+    if not isinstance(raw_checks, list):
+        raise HarnessValidationError(f"{field_name} must be a list")
+    resolved: list[HarnessCommand] = []
+    updated = dict(command_map)
+    for item in raw_checks:
+        if isinstance(item, str):
+            command = updated.get(item)
+            if command is None:
+                raise HarnessValidationError(f"{field_name} references unknown command: {item}")
+        elif isinstance(item, dict):
+            command = validate_command_item(item)
+            existing = updated.get(command.name)
+            if existing is not None and existing != command:
+                raise HarnessValidationError(f"command {command.name} is defined inconsistently")
+            updated[command.name] = command
+        else:
+            raise HarnessValidationError(f"{field_name} entries must be command names or objects")
+        if command not in resolved:
+            resolved.append(command)
+    return tuple(resolved), updated
+
+
+def _ensure_unique_command_names(commands: tuple[HarnessCommand, ...]) -> None:
+    names = [command.name for command in commands]
+    if len(names) != len(set(names)):
+        raise HarnessValidationError("command names must be unique")
+
+
+def _review_role_name(role: str) -> str:
+    if not isinstance(role, str) or not role.strip():
+        raise HarnessValidationError("review role must be a non-empty string")
+    normalized = role.strip().lower()
+    aliases = {
+        "code": "code-review",
+        "code-review": "code-review",
+        "test": "test-review",
+        "test-review": "test-review",
+    }
+    if normalized not in aliases:
+        raise HarnessValidationError(f"unsupported review role: {role}")
+    return aliases[normalized]
+
+
+def _command_roles(roles: list[str]) -> tuple[str, ...]:
+    aliases = {
+        "code": "code-review",
+        "code-review": "code-review",
+        "test": "test-review",
+        "test-review": "test-review",
+        "validation": "validation",
+        "stop": "stop",
+    }
+    normalized: list[str] = []
+    for role in _unique_strings(roles, "command.roles"):
+        if role not in aliases:
+            raise HarnessValidationError(f"unsupported command role: {role}")
+        value = aliases[role]
+        if value not in normalized:
+            normalized.append(value)
+    return tuple(normalized)
+
+
+def _load_step_policies(raw: Any) -> dict[str, str]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise HarnessValidationError("stepPolicies must be an object")
+    allowed = {"required", "regression", "optional", "none"}
+    policies: dict[str, str] = {}
+    for kind, value in raw.items():
+        if not isinstance(kind, str) or not kind.strip():
+            raise HarnessValidationError("step policy name must be a non-empty string")
+        if isinstance(value, dict):
+            value = value.get("testChange", value.get("test_change"))
+        if value not in allowed:
+            raise HarnessValidationError(
+                f"stepPolicies.{kind} must be one of {', '.join(sorted(allowed))}"
+            )
+        policies[kind] = value
+    return policies
+
+
+def _load_mutation_ignore(raw: Any) -> tuple[str, ...]:
+    if raw in (None, ()):
+        raw = []
+    if not isinstance(raw, list):
+        raise HarnessValidationError("reviewMutationIgnore must be a list")
+    values = list(DEFAULT_REVIEW_MUTATION_IGNORES)
+    for item in raw:
+        if not isinstance(item, str) or not item.strip():
+            raise HarnessValidationError("reviewMutationIgnore entries must be non-empty strings")
+        normalized = item.strip().replace("\\", "/")
+        if not normalized or normalized.startswith(("/", "~")) or ".." in normalized.split("/"):
+            raise HarnessValidationError(f"unsafe reviewMutationIgnore path: {item}")
+        if normalized not in values:
+            values.append(normalized)
+    return tuple(values)
+
+
+def _unique_strings(values: list[str], field_name: str) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        normalized = value.strip()
+        if not normalized:
+            raise HarnessValidationError(f"{field_name} entries must be non-empty strings")
+        if normalized not in result:
+            result.append(normalized)
+    return result
 
 
 def unsafe_command_reason(command: list[str]) -> str | None:
@@ -230,6 +451,9 @@ def validate_project(
         return ValidationResult(root, configured, [], [str(exc)], command_results)
 
     profiles = active_profiles(root, config.profiles)
+
+    if config.profiles and not config.commands:
+        errors.append("configured validation profile must define at least one validation command")
 
     if config.checks.get("docs", True):
         errors.extend(check_docs(root, configured=configured))
@@ -307,14 +531,23 @@ def check_phase_metadata(root: Path) -> list[str]:
 
 
 def run_harness_command(root: Path, command: HarnessCommand) -> dict[str, Any]:
-    completed = subprocess.run(
-        list(command.command),
-        cwd=root,
-        capture_output=True,
-        text=True,
-        timeout=600,
-        shell=False,
-    )
+    try:
+        completed = subprocess.run(
+            list(command.command),
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=600,
+            shell=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {
+            "name": command.name,
+            "command": list(command.command),
+            "returncode": 1,
+            "stdout": "",
+            "stderr": str(exc)[-4000:],
+        }
     return {
         "name": command.name,
         "command": list(command.command),

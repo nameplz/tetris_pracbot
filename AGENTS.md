@@ -19,7 +19,6 @@
 - `harness-review`: 변경사항 리뷰 시 아키텍처, ADR, 테스트, CRITICAL 규칙, 빌드 가능성 검증.
 
 ## 명령어
-npm run dev      # 개발 서버
-npm run build    # 프로덕션 빌드
-npm run lint     # ESLint
-npm run test     # 테스트
+`.harness/validation.json`의 프로젝트별 profile이 validation, reviewer, stop 명령을 정의한다.
+구체적인 실행 명령은 생성된 프로젝트의 profile을 따르며, Harness core·hook은
+특정 언어·패키지 매니저 명령을 하드코딩하지 않는다.

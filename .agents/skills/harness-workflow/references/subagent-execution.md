@@ -30,6 +30,13 @@
 15. 모든 step 완료 후 phase와 top-level index를 `completed`로 갱신한다.
 16. 사용자가 push를 명시한 경우에만 `git push -u origin feat-{phase}`를 실행한다.
 
+Implementation worker 시작 직전 메인 세션은 `started_at`을 기록하고 runtime heartbeat를
+초기화한다. worker 실행 중 heartbeat는 약 60초마다 `progress`와 `updated_at`을 갱신하고,
+메인 세션은 같은 주기로 사용자 status update를 제공한다. `started_at`부터 1800초가 지나면
+heartbeat가 최근이어도 해당 attempt는 `stuck`이다. `stuck_retry`는 새 implementation
+worker로 별도 재시도하고, `pipeline_attempt`(review/security/CI 실패 retry)와 합산하지 않는다.
+최대 stuck retry를 넘으면 step은 `error`다.
+
 메인 세션은 구현 세부 작업을 직접 수행하지 않는다. 단, worker 결과 검토, metadata 갱신, 커밋, 재시도 판단은 메인 세션이 담당한다.
 
 ## Worker Launch
@@ -81,7 +88,7 @@ Previous completed step summaries:
 - Do not modify phase metadata files.
 - The implementation worker may edit code and tests but must not commit, push, or merge.
 - The code-review/test/security worker must not edit files, commit, push, or merge.
-- Code-review/test workers must directly run unit tests, integration tests, Ruff, Mypy, and Pytest, and report whether tests verify externally visible behavior.
+- Code Review와 Test Review는 `.harness/validation.json`의 `reviewChecks`에 배정된 argv만 직접 실행한다. Code Review는 spec/architecture/ADR/criteria/logic/contract/scope를 담당하고, Test Review는 externally observable behavior, regression, coverage와 배정된 test check를 담당한다. profile에 없는 Python/Node/Go/Rust 도구를 추측하지 않으며 같은 전체 suite를 중복 실행하지 않는다.
 - The security worker must report explicit `yaml`, `paths`, `inputs`, and `logs` checks, including any credential or customer-data exposure.
 - Every reviewer must report failure cause and a concrete fix recommendation; the main session sends those findings back to the implementation worker.
 - Run the Acceptance Criteria commands from the step file when the role permits it.
@@ -104,7 +111,7 @@ Review results additionally include:
 - `changed_files`: must be empty for a reviewer
 - `committed`: must be `false` for a reviewer
 - `findings`: severity, cause, and a concrete recommendation
-- `validation`: `unit-tests`, `integration-tests`, `ruff`, `mypy`, and `pytest` for code/test review
+- `validation`: project profile이 reviewer에게 배정한 check의 name, argv, pass/fail, output
 - `security_checks`: `yaml`, `paths`, `inputs`, and `logs` for security review
 ```
 

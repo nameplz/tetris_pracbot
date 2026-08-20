@@ -12,29 +12,18 @@ from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any, Protocol
 
+from scripts.harness_validation import HarnessCommand
+
 
 PHASE_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
-INITIAL_COMPLETION_CONDITION_COUNT = 10
+MIN_COMPLETION_CONDITIONS = 1
 MAX_COMPLETION_CONDITIONS = 100
 MAX_COMPLETION_CONDITIONS_LENGTH = 20_000
 DEFAULT_COMPLETION_CRITERIA_PATH = "docs/completion-criteria.md"
-REQUIRED_REVIEW_CHECKS = (
-    "unit-tests",
-    "integration-tests",
-    "ruff",
-    "mypy",
-    "pytest",
-    "coverage",
-)
+# Deprecated compatibility aliases; project profiles now define reviewer checks.
+REQUIRED_REVIEW_CHECKS: tuple[str, ...] = ()
+REVIEW_COMMAND_TOKENS: dict[str, str] = {}
 REQUIRED_SECURITY_CHECKS = ("yaml", "paths", "inputs", "logs")
-REVIEW_COMMAND_TOKENS = {
-    "unit-tests": "pytest",
-    "integration-tests": "pytest",
-    "ruff": "ruff",
-    "mypy": "mypy",
-    "pytest": "pytest",
-    "coverage": "--cov-fail-under=80",
-}
 SENSITIVE_LOG_PATTERNS = (
     (
         re.compile(r"(?i)\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]+"),
@@ -185,6 +174,11 @@ class AgentRequest:
     read_only: bool = False
     allow_write: bool = False
     allow_commit: bool = False
+    started_at: str | None = None
+    deadline_at: str | None = None
+    heartbeat_path: str | None = None
+    status_update_interval_seconds: int | None = None
+    stuck_after_seconds: int | None = None
 
     def __post_init__(self) -> None:
         validate_phase_and_step(self.phase, self.step, self.step_name)
@@ -204,6 +198,21 @@ class AgentRequest:
             raise ValueError("read-only agent cannot be granted write access")
         if self.read_only and self.allow_commit:
             raise ValueError("read-only agent cannot commit")
+        for name, value in (
+            ("started_at", self.started_at),
+            ("deadline_at", self.deadline_at),
+            ("heartbeat_path", self.heartbeat_path),
+        ):
+            if value is not None and (not isinstance(value, str) or not value.strip()):
+                raise ValueError(f"{name} must be a non-empty string when supplied")
+        for name, value in (
+            ("status_update_interval_seconds", self.status_update_interval_seconds),
+            ("stuck_after_seconds", self.stuck_after_seconds),
+        ):
+            if value is not None and (
+                not isinstance(value, int) or isinstance(value, bool) or value < 1
+            ):
+                raise ValueError(f"{name} must be a positive integer when supplied")
 
 
 @dataclass(frozen=True)
@@ -337,6 +346,7 @@ class PipelineResult:
     errors: tuple[str, ...] = ()
     events: tuple[str, ...] = ()
     completion_conditions: tuple[str, ...] = ()
+    stuck_retries: int = 0
 
 
 class AgentRunner(Protocol):
@@ -369,14 +379,16 @@ def validate_phase_and_step(phase: str, step: int, step_name: str) -> None:
 
 
 def validate_completion_conditions(
-    conditions: Sequence[str], *, confirmed: bool
+    conditions: Sequence[str], *, confirmed: bool, max_conditions: int = MAX_COMPLETION_CONDITIONS
 ) -> tuple[str, ...]:
-    """Validate the initial ten-condition draft or a confirmed variable-size list."""
+    """Validate a non-empty, variable-size criteria list."""
 
     if not isinstance(confirmed, bool):
         raise ValueError("confirmed must be boolean")
     if isinstance(conditions, (str, bytes)) or not isinstance(conditions, Sequence):
         raise ValueError("completion conditions must be a sequence of strings")
+    if not isinstance(max_conditions, int) or isinstance(max_conditions, bool) or max_conditions < 1:
+        raise ValueError("max_conditions must be a positive integer")
     normalized: list[str] = []
     seen: set[str] = set()
     total_length = 0
@@ -400,39 +412,83 @@ def validate_completion_conditions(
         seen.add(value)
         normalized.append(value)
 
-    if len(normalized) > MAX_COMPLETION_CONDITIONS:
-        raise ValueError(f"completion conditions cannot exceed {MAX_COMPLETION_CONDITIONS} items")
-    if confirmed and not normalized:
-        raise ValueError("confirmed completion conditions must not be empty")
-    if not confirmed and len(normalized) != INITIAL_COMPLETION_CONDITION_COUNT:
-        raise ValueError(
-            "unconfirmed completion conditions must contain exactly "
-            f"{INITIAL_COMPLETION_CONDITION_COUNT} items"
-        )
+    if len(normalized) > max_conditions:
+        raise ValueError(f"completion conditions cannot exceed {max_conditions} items")
+    if len(normalized) < MIN_COMPLETION_CONDITIONS:
+        raise ValueError("completion conditions must contain at least one item")
     return tuple(normalized)
 
 
 def save_completion_criteria(
-    root: Path, relative_path: str, conditions: Sequence[str]
+    root: Path,
+    relative_path: str,
+    conditions: Sequence[str],
+    *,
+    max_conditions: int = MAX_COMPLETION_CONDITIONS,
 ) -> Path:
     """Write confirmed criteria to one safe Markdown path under the workspace."""
 
     if not isinstance(root, Path):
         raise ValueError("root must be a Path")
-    normalized_conditions = validate_completion_conditions(conditions, confirmed=True)
+    normalized_conditions = validate_completion_conditions(
+        conditions,
+        confirmed=True,
+        max_conditions=max_conditions,
+    )
     if not isinstance(relative_path, str) or not relative_path.lower().endswith(".md"):
         raise ValueError("completion criteria path must be a Markdown file")
     normalized_path = validate_paths_under_root(root, (relative_path,))[0]
     target = root.resolve() / normalized_path
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(render_completion_criteria(normalized_conditions), encoding="utf-8")
+    target.write_text(
+        render_completion_criteria(normalized_conditions, max_conditions=max_conditions),
+        encoding="utf-8",
+    )
     return target
 
 
-def render_completion_criteria(conditions: Sequence[str]) -> str:
+def load_completion_criteria(
+    root: Path,
+    relative_path: str = DEFAULT_COMPLETION_CRITERIA_PATH,
+    *,
+    max_conditions: int = MAX_COMPLETION_CONDITIONS,
+) -> tuple[str, ...]:
+    """Read confirmed criteria from its durable Markdown artifact."""
+
+    if not isinstance(root, Path):
+        raise ValueError("root must be a Path")
+    if not isinstance(relative_path, str) or not relative_path.lower().endswith(".md"):
+        raise ValueError("completion criteria path must be a Markdown file")
+    normalized_path = validate_paths_under_root(root, (relative_path,))[0]
+    target = root.resolve() / normalized_path
+    try:
+        content = target.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"could not read completion criteria: {normalized_path}") from exc
+    conditions = tuple(
+        line[6:].strip()
+        for line in content.splitlines()
+        if line.startswith("- [ ] ")
+    )
+    if not conditions:
+        raise ValueError("completion criteria artifact must contain at least one condition")
+    return validate_completion_conditions(
+        conditions,
+        confirmed=True,
+        max_conditions=max_conditions,
+    )
+
+
+def render_completion_criteria(
+    conditions: Sequence[str], *, max_conditions: int = MAX_COMPLETION_CONDITIONS
+) -> str:
     """Render validated confirmed criteria deterministically."""
 
-    normalized_conditions = validate_completion_conditions(conditions, confirmed=True)
+    normalized_conditions = validate_completion_conditions(
+        conditions,
+        confirmed=True,
+        max_conditions=max_conditions,
+    )
     return (
         "# Completion Criteria\n\n"
         f"현재 확정 조건 수: {len(normalized_conditions)}\n\n"
@@ -517,9 +573,12 @@ def sanitize_log(value: str, *, max_length: int = 4000) -> str:
 
 
 def validate_review_result(
-    result: AgentResult, *, completion_conditions: Sequence[str] = ()
+    result: AgentResult,
+    *,
+    completion_conditions: Sequence[str] = (),
+    review_checks: Sequence[HarnessCommand] = (),
 ) -> None:
-    """Validate the code-review/test-agent contract without deciding findings."""
+    """Validate reviewer output against project-defined checks."""
 
     errors: list[str] = []
     if result.role not in {AgentRole.CODE_REVIEW, AgentRole.TEST}:
@@ -528,21 +587,24 @@ def validate_review_result(
         errors.append("review agent reported a commit")
     if result.changed_files:
         errors.append("review agent changed files")
-    errors.extend(_check_name_errors(result.validation, REQUIRED_REVIEW_CHECKS, "review"))
-    checks = {check.name: check for check in result.validation}
-    for required in REQUIRED_REVIEW_CHECKS:
-        check = checks.get(required)
-        if check is None:
-            errors.append(f"review did not run {required}")
-        else:
+    configured_checks = tuple(check for check in review_checks if getattr(check, "required", True))
+    if configured_checks:
+        required_names = tuple(check.name for check in configured_checks)
+        errors.extend(_check_name_errors(result.validation, required_names, "review"))
+        checks = {check.name: check for check in result.validation}
+        for expected in configured_checks:
+            check = checks.get(expected.name)
+            if check is None:
+                errors.append(f"review did not run {expected.name}")
+                continue
             if not check.passed:
-                errors.append(f"review check failed: {required}")
-            command = " ".join(check.command).lower()
-            expected_token = REVIEW_COMMAND_TOKENS[required]
-            if expected_token not in command:
-                errors.append(f"review command for {required} did not execute {expected_token}")
-    if not result.external_behavior_verified:
-        errors.append("review did not verify external behavior")
+                errors.append(f"review check failed: {expected.name}")
+            if not _command_contains(check.command, expected.command):
+                errors.append(
+                    f"review command for {expected.name} did not execute {' '.join(expected.command)}"
+                )
+    if result.role == AgentRole.TEST and not result.external_behavior_verified:
+        errors.append("test review did not verify external behavior")
     if result.role == AgentRole.CODE_REVIEW and completion_conditions:
         try:
             validate_completion_reviews(result.criteria_reviews, completion_conditions)
@@ -552,16 +614,20 @@ def validate_review_result(
         raise ReviewContractError("; ".join(errors))
 
 
-def validate_implementation_result(result: AgentResult) -> None:
-    """Require implementation output to include a test change and no commit."""
+def validate_implementation_result(result: AgentResult, *, test_requirement: str = "required") -> None:
+    """Validate implementation access and the step's configured test-change policy."""
 
     if result.role != AgentRole.IMPLEMENTATION:
         raise ValueError("result is not from the implementation agent")
     if result.committed:
         raise ValueError("implementation agent must not commit")
-    test_change = any(_looks_like_test_path(path) for path in result.changed_files)
-    if not test_change:
-        raise ValueError("implementation did not add or update a test file")
+    if test_requirement not in {"required", "regression", "optional", "none"}:
+        raise ValueError("test requirement is invalid")
+    if test_requirement in {"required", "regression"}:
+        test_change = any(_looks_like_test_path(path) for path in result.changed_files)
+        if not test_change:
+            label = "regression test" if test_requirement == "regression" else "test file"
+            raise ValueError(f"implementation did not add or update a {label}")
 
 
 def _looks_like_test_path(path: str) -> bool:
@@ -617,6 +683,17 @@ def _check_name_errors(
     if unknown:
         errors.append(f"{label} checks contain unknown names: {', '.join(unknown)}")
     return errors
+
+
+def _command_contains(actual: Sequence[str], expected: Sequence[str]) -> bool:
+    if not expected or len(actual) < len(expected):
+        return False
+    expected_tuple = tuple(part.lower() for part in expected)
+    actual_tuple = tuple(part.lower() for part in actual)
+    return any(
+        actual_tuple[index : index + len(expected_tuple)] == expected_tuple
+        for index in range(len(actual_tuple) - len(expected_tuple) + 1)
+    )
 
 
 def _string_tuple(value: Any, name: str) -> tuple[str, ...]:

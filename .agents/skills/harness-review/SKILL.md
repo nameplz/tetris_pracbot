@@ -25,9 +25,12 @@ origin: harness_framework
 3. **테스트 존재**: 새로운 기능 또는 변경된 동작에 대한 테스트가 작성되어 있는가?
 4. **CRITICAL 규칙**: `AGENTS.md`의 CRITICAL 규칙을 위반하지 않았는가?
 5. **빌드 가능**: 빌드/테스트 명령어가 에러 없이 통과하는가?
-6. **리뷰 계약**: 단위·통합 테스트, Ruff, Mypy, Pytest를 직접 실행했고 외부 동작을 검증하는가? 리뷰 worker가 파일을 수정하거나 커밋하지 않았는가?
+6. **리뷰 계약**: `.harness/validation.json`의 reviewer별 check를 직접 실행했고 외부 동작을 검증하는가? Code Review와 Test Review가 같은 전체 suite를 중복 실행하지 않았는가? 리뷰 worker가 파일을 수정하거나 커밋하지 않았는가?
 7. **보안 범위**: YAML, 경로 traversal, 입력값 경계, subprocess, 로그의 credential·고객 데이터 노출을 점검했는가?
 8. **CI 게이트**: PR 이후 CI 결과가 성공했는가? 실패 시 원인과 구현 worker용 수정 제안이 기록되었는가?
+9. **Watchdog**: implementation `started_at`, 60초 heartbeat/status update, 1800초 stuck 판정, `pipeline_attempt`/`stuck_retry` 분리가 contract와 일치하는가?
+10. **Criteria**: 1..N completion criteria가 durable artifact에서 동일하게 전달되고, Code Review가 각 항목을 한 번씩 `pass/fail`·`path:line`으로 평가하는가?
+11. **Mutation**: Git tracked/untracked 변경, configured generated ignore, `.git` metadata 변경을 각각 검증하는가?
 
 ## Output Format
 
@@ -39,7 +42,7 @@ origin: harness_framework
 | 테스트 존재 | ✅/❌ | {상세} |
 | CRITICAL 규칙 | ✅/❌ | {상세} |
 | 빌드 가능 | ✅/❌ | {상세} |
-| 리뷰 계약 | ✅/❌ | {실행한 테스트·정적 분석과 read-only 확인} |
+| 리뷰 계약 | ✅/❌ | {profile이 배정한 check·정적 분석과 read-only 확인} |
 | 보안 범위 | ✅/❌ | {YAML·경로·입력·로그 결과} |
 | PR CI 게이트 | ✅/❌ | {CI 결과 또는 실패 원인} |
 ```

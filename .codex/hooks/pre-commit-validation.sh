@@ -1,24 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 payload_file="${TMPDIR:-/tmp}/codex-pre-commit-validation.$$"
 cat > "$payload_file"
 
-python3 - "$payload_file" <<'PY'
+HARNESS_ROOT="$ROOT" python3 - "$payload_file" <<'PY'
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
 from pathlib import Path
-
-
-VALIDATION_SCRIPTS = (
-    ("lint", ["npm", "run", "lint"]),
-    ("build", ["npm", "run", "build"]),
-    ("test", ["npm", "run", "test"]),
-)
 
 
 def load_payload(path: str) -> dict:
@@ -40,16 +35,27 @@ def is_git_commit(command: str) -> bool:
     return bool(re.search(r"(^|[;&|]\s*)git\s+commit(\s|$)", command))
 
 
-def load_package_scripts(cwd: Path) -> set[str]:
-    package_json = cwd / "package.json"
-    if not package_json.exists():
-        return set()
+def load_stop_checks(cwd: Path):
+    config_path = cwd / ".harness/validation.json"
+    if not config_path.exists():
+        return ()
     try:
-        data = json.loads(package_json.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return set()
-    scripts = data.get("scripts", {})
-    return set(scripts) if isinstance(scripts, dict) else set()
+        sys.path.insert(0, os.environ["HARNESS_ROOT"])
+        from scripts.harness_validation import get_stop_checks, load_validation_config
+
+        return get_stop_checks(load_validation_config(config_path))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"invalid Harness validation profile: {exc}") from exc
+
+
+def sanitize_output(value: str) -> str:
+    try:
+        sys.path.insert(0, os.environ["HARNESS_ROOT"])
+        from scripts.step_contracts import sanitize_log
+
+        return sanitize_log(value)
+    except (ImportError, ValueError):
+        return value[-3000:]
 
 
 def run_command(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -86,28 +92,32 @@ def main() -> int:
         return 0
 
     cwd = Path(payload.get("cwd") or ".").resolve()
-    package_scripts = load_package_scripts(cwd)
-    commands = [
-        (script_name, command_parts)
-        for script_name, command_parts in VALIDATION_SCRIPTS
-        if script_name in package_scripts
-    ]
+    try:
+        commands = load_stop_checks(cwd)
+    except ValueError as exc:
+        deny(str(exc))
+        return 0
     if not commands:
         return 0
 
     failures: list[str] = []
-    for script_name, command_parts in commands:
-        result = run_command(command_parts, cwd)
+    for configured in commands:
+        command_parts = list(configured.command)
+        try:
+            result = run_command(command_parts, cwd)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            failures.append(f"`{' '.join(command_parts)}` failed: {exc}")
+            continue
         if result.returncode != 0:
             output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
             failures.append(
                 f"`{' '.join(command_parts)}` failed with exit code {result.returncode}.\n"
-                f"{output[-3000:]}"
+                f"{sanitize_output(output[-3000:])}"
             )
 
     if failures:
         deny(
-            "Pre-commit validation failed. Fix lint/build/test before committing:\n\n"
+            "Pre-commit project validation failed. Fix configured checks before committing:\n\n"
             + "\n\n".join(failures)
         )
     return 0
