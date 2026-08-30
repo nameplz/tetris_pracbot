@@ -2,7 +2,8 @@
   "project": "TETR.IO AI Bot",
   "phase": "phase-10-bot-approval",
   "issue": 10,
+  "summary": "blocked/not ready: Phase 9 full evidence is required before external approval",
   "steps": [
-    {"step": 0, "name": "manual-handoff", "status": "pending"}
+    {"step": 0, "name": "manual-handoff", "status": "completed"}
   ]
 }
