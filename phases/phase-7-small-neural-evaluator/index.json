@@ -1,0 +1,8 @@
+{
+  "project": "TETR.IO AI Bot",
+  "phase": "phase-7-small-neural-evaluator",
+  "issue": 7,
+  "steps": [
+    {"step": 0, "name": "adoption-gate", "status": "pending"}
+  ]
+}

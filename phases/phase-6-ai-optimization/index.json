@@ -1,0 +1,9 @@
+{
+  "project": "TETR.IO AI Bot",
+  "phase": "phase-6-ai-optimization",
+  "issue": 6,
+  "steps": [
+    {"step": 0, "name": "measurement", "status": "pending"},
+    {"step": 1, "name": "pruning-and-cache", "status": "pending"}
+  ]
+}

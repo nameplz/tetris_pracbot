@@ -1,0 +1,11 @@
+{
+  "project": "TETR.IO AI Bot",
+  "phase": "phase-1-rules-engine",
+  "issue": 1,
+  "steps": [
+    {"step": 0, "name": "ruleset-and-state", "status": "pending"},
+    {"step": 1, "name": "piece-and-board-transitions", "status": "pending"},
+    {"step": 2, "name": "garbage-and-attack", "status": "pending"},
+    {"step": 3, "name": "rules-fixtures", "status": "pending"}
+  ]
+}

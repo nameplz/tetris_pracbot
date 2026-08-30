@@ -1,0 +1,10 @@
+{
+  "project": "TETR.IO AI Bot",
+  "phase": "phase-5-local-vs-selfplay",
+  "issue": 5,
+  "steps": [
+    {"step": 0, "name": "local-simulator", "status": "pending"},
+    {"step": 1, "name": "selfplay-runner", "status": "pending"},
+    {"step": 2, "name": "benchmark-report", "status": "pending"}
+  ]
+}

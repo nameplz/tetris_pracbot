@@ -1,0 +1,14 @@
+{
+  "phases": [
+    {"dir": "phase-1-rules-engine", "status": "pending"},
+    {"dir": "phase-2-move-generator", "status": "pending"},
+    {"dir": "phase-3-heuristic-ai", "status": "pending"},
+    {"dir": "phase-4-search-ai", "status": "pending"},
+    {"dir": "phase-5-local-vs-selfplay", "status": "pending"},
+    {"dir": "phase-6-ai-optimization", "status": "pending"},
+    {"dir": "phase-7-small-neural-evaluator", "status": "pending"},
+    {"dir": "phase-8-pps-controller", "status": "pending"},
+    {"dir": "phase-9-final-local-validation", "status": "pending"},
+    {"dir": "phase-10-bot-approval", "status": "pending"}
+  ]
+}

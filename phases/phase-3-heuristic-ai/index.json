@@ -1,0 +1,9 @@
+{
+  "project": "TETR.IO AI Bot",
+  "phase": "phase-3-heuristic-ai",
+  "issue": 3,
+  "steps": [
+    {"step": 0, "name": "feature-extractor", "status": "pending"},
+    {"step": 1, "name": "heuristic-agent", "status": "pending"}
+  ]
+}
