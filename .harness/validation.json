@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "mode": "profile",
+  "profiles": ["python"],
+  "commands": [
+    {
+      "name": "compile-runtime",
+      "command": ["python3", "-m", "compileall", "-q", "engine", "ai", "arena", "benchmark", "visual"],
+      "reason": "Compile runtime Python modules",
+      "roles": ["code-review", "stop"]
+    },
+    {
+      "name": "unit-tests",
+      "command": ["python3", "-m", "unittest", "discover", "-s", "tests"],
+      "reason": "Run repository regression and runtime tests",
+      "roles": ["test-review", "stop"]
+    }
+  ],
+  "stopChecks": ["compile-runtime", "unit-tests"],
+  "reviewChecks": {
+    "code-review": ["compile-runtime"],
+    "test-review": ["unit-tests"]
+  },
+  "stepPolicies": {
+    "feature": "required",
+    "bugfix": "regression",
+    "refactor": "optional",
+    "docs": "none",
+    "ci": "none",
+    "config": "none",
+    "metadata": "none"
+  },
+  "reviewMutationIgnore": [".git", ".harness/runtime", ".pytest_cache", "__pycache__"],
+  "maxCompletionConditions": 20,
+  "checks": {"docs": true, "deploy": true, "phase": true}
+}
