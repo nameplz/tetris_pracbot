@@ -25,6 +25,7 @@ from .rules import (
     rotate_placement,
     seven_bag,
 )
+from .movegen import Candidate, Move, generate_candidates, replay_path, validate_move
 
 __all__ = [
     "Board",
@@ -48,4 +49,9 @@ __all__ = [
     "piece_cells",
     "rotate_placement",
     "seven_bag",
+    "Candidate",
+    "Move",
+    "generate_candidates",
+    "replay_path",
+    "validate_move",
 ]

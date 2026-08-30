@@ -1,6 +1,6 @@
 {
   "phases": [
-    {"dir": "phase-1-rules-engine", "status": "pending"},
+    {"dir": "phase-1-rules-engine", "status": "completed"},
     {"dir": "phase-2-move-generator", "status": "pending"},
     {"dir": "phase-3-heuristic-ai", "status": "pending"},
     {"dir": "phase-4-search-ai", "status": "pending"},
