@@ -3,7 +3,7 @@
     {"dir": "phase-1-rules-engine", "status": "completed"},
     {"dir": "phase-2-move-generator", "status": "completed"},
     {"dir": "phase-3-heuristic-ai", "status": "completed"},
-    {"dir": "phase-4-search-ai", "status": "pending"},
+    {"dir": "phase-4-search-ai", "status": "completed"},
     {"dir": "phase-5-local-vs-selfplay", "status": "pending"},
     {"dir": "phase-6-ai-optimization", "status": "pending"},
     {"dir": "phase-7-small-neural-evaluator", "status": "pending"},
