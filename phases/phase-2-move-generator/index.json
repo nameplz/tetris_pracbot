@@ -3,8 +3,8 @@
   "phase": "phase-2-move-generator",
   "issue": 2,
   "steps": [
-    {"step": 0, "name": "move-model", "status": "pending"},
-    {"step": 1, "name": "reachable-search", "status": "pending"},
-    {"step": 2, "name": "path-validation", "status": "pending"}
+    {"step": 0, "name": "move-model", "status": "completed"},
+    {"step": 1, "name": "reachable-search", "status": "completed"},
+    {"step": 2, "name": "path-validation", "status": "completed"}
   ]
 }
