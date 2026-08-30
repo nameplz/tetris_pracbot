@@ -1,0 +1,8 @@
+{
+  "project": "TETR.IO AI Bot",
+  "phase": "phase-10-bot-approval",
+  "issue": 10,
+  "steps": [
+    {"step": 0, "name": "manual-handoff", "status": "pending"}
+  ]
+}

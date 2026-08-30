@@ -1,0 +1,9 @@
+{
+  "project": "TETR.IO AI Bot",
+  "phase": "phase-9-final-local-validation",
+  "issue": 9,
+  "steps": [
+    {"step": 0, "name": "completion-validator", "status": "pending"},
+    {"step": 1, "name": "soak-and-evidence", "status": "pending"}
+  ]
+}

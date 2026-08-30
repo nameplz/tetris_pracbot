@@ -1,0 +1,9 @@
+{
+  "ruleset_version": "tetrio-public-2026-08-30",
+  "visible_board": {"width": 10, "height": 20, "buffer_height": 4},
+  "seven_bag": {
+    "seed": 12,
+    "pieces": ["Z", "J", "I", "T", "S", "L", "O", "Z", "J", "S", "T", "O", "L", "I"]
+  },
+  "garbage": {"hole": 3, "lines": 1, "arrival_tick": 0}
+}

@@ -1,0 +1,34 @@
+version: tetrio-public-2026-08-30
+source: public-observable-project-scope
+visible_width: 10
+visible_height: 20
+buffer_height: 4
+bag: 7-bag
+next: 5
+hold: true
+hard_drop: true
+rotation: SRS+
+gravity: 0G
+gravity_increase: 0
+lock_delay_ms: 500
+garbage_multiplier: 1.0
+garbage_increase: 0
+passthrough: false
+b2b_charging: true
+combo_multiplier: true
+opener_phase: true
+clutch_clear: true
+supported:
+  - spin
+  - all-mini-plus
+  - line-clear
+  - garbage
+  - attack
+  - combo
+  - surge
+  - all-clear
+  - top-out
+unsupported:
+  - network-adapter
+  - bot-account
+  - private-upstream-behavior
