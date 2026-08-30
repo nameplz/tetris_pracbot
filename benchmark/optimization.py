@@ -9,7 +9,7 @@ from typing import Any
 
 from ai.search import BeamSearchAgent, OptimizedBeamSearchAgent
 from engine.rules import initial_game_state
-from engine.state import BotStandardPreset, stable_json
+from engine.state import BotStandardPreset
 
 from .report import _percentile
 
