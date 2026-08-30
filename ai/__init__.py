@@ -2,7 +2,7 @@
 
 from .agents import Agent, GreedyAgent, RandomAgent
 from .heuristic import Evaluation, FeatureVector, HeuristicEvaluator, WeightSet, extract_features
-from .search import BeamSearchAgent, SearchResult
+from .search import BeamSearchAgent, OptimizedBeamSearchAgent, SearchResult
 
 __all__ = [
     "Agent",
@@ -12,6 +12,7 @@ __all__ = [
     "GreedyAgent",
     "HeuristicEvaluator",
     "RandomAgent",
+    "OptimizedBeamSearchAgent",
     "SearchResult",
     "WeightSet",
     "extract_features",
