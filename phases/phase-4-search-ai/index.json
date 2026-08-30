@@ -3,7 +3,7 @@
   "phase": "phase-4-search-ai",
   "issue": 4,
   "steps": [
-    {"step": 0, "name": "beam-search", "status": "pending"},
-    {"step": 1, "name": "time-budget", "status": "pending"}
+    {"step": 0, "name": "beam-search", "status": "completed"},
+    {"step": 1, "name": "time-budget", "status": "completed"}
   ]
 }
