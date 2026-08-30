@@ -7,7 +7,7 @@ import time
 from typing import Any
 
 from engine.movegen import Candidate, Move, generate_candidates
-from engine.state import GameState
+from engine.state import GameState, stable_json
 
 from .heuristic import HeuristicEvaluator
 
@@ -27,6 +27,7 @@ class SearchResult:
     completed_depth: int
     elapsed_ms: float
     fallback_used: bool = False
+    cache_hits: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -37,6 +38,7 @@ class SearchResult:
             "completed_depth": self.completed_depth,
             "elapsed_ms": self.elapsed_ms,
             "fallback_used": self.fallback_used,
+            "cache_hits": self.cache_hits,
         }
 
 
@@ -45,12 +47,15 @@ class BeamSearchAgent:
     depth: int = 2
     beam_width: int = 10
     time_budget_ms: int = 100
+    cache_enabled: bool = False
     evaluator: HeuristicEvaluator = field(default_factory=HeuristicEvaluator)
 
     def __post_init__(self) -> None:
         _positive_int("depth", self.depth)
         _positive_int("beam width", self.beam_width)
         _positive_int("time budget", self.time_budget_ms)
+        if not isinstance(self.cache_enabled, bool):
+            raise ValueError("cache_enabled must be a boolean")
         if not isinstance(self.evaluator, HeuristicEvaluator):
             raise ValueError("evaluator must be a HeuristicEvaluator")
 
@@ -69,7 +74,28 @@ class BeamSearchAgent:
     def search(self, state: GameState, player_index: int = 0) -> SearchResult:
         started = time.perf_counter()
         deadline = started + self.time_budget_ms / 1000.0
-        roots = generate_candidates(state, player_index)
+        candidate_cache: dict[tuple[str, int, int, int, int], tuple[Candidate, ...]] = {}
+        cache_hits = 0
+
+        def candidates_for(snapshot: GameState) -> tuple[Candidate, ...]:
+            nonlocal cache_hits
+            if not self.cache_enabled:
+                return generate_candidates(snapshot, player_index)
+            key = (
+                stable_json(snapshot),
+                player_index,
+                self.depth,
+                self.beam_width,
+                self.time_budget_ms,
+            )
+            if key in candidate_cache:
+                cache_hits += 1
+                return candidate_cache[key]
+            generated = generate_candidates(snapshot, player_index)
+            candidate_cache[key] = generated
+            return generated
+
+        roots = candidates_for(state)
         if not roots:
             raise ValueError("no legal Move candidates")
 
@@ -93,7 +119,7 @@ class BeamSearchAgent:
                     break
                 if leaf.state.players[player_index].top_out:
                     continue
-                children = generate_candidates(leaf.state, player_index)
+                children = candidates_for(leaf.state)
                 nodes += len(children)
                 expanded.extend((root, child) for child in children)
                 if time.perf_counter() >= deadline:
@@ -129,4 +155,12 @@ class BeamSearchAgent:
             completed_depth=completed_depth,
             elapsed_ms=elapsed_ms,
             fallback_used=False,
+            cache_hits=cache_hits,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class OptimizedBeamSearchAgent(BeamSearchAgent):
+    """Beam search with a per-decision immutable-state candidate cache."""
+
+    cache_enabled: bool = True
