@@ -3,7 +3,7 @@
   "phase": "phase-8-pps-controller",
   "issue": 8,
   "steps": [
-    {"step": 0, "name": "execution-scheduler", "status": "pending"},
-    {"step": 1, "name": "replay-controls", "status": "pending"}
+    {"step": 0, "name": "execution-scheduler", "status": "completed"},
+    {"step": 1, "name": "replay-controls", "status": "completed"}
   ]
 }
