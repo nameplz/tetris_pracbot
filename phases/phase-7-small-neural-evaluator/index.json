@@ -2,7 +2,8 @@
   "project": "TETR.IO AI Bot",
   "phase": "phase-7-small-neural-evaluator",
   "issue": 7,
+  "summary": "not planned: no benchmark-proven neural gap; retain heuristic Search",
   "steps": [
-    {"step": 0, "name": "adoption-gate", "status": "pending"}
+    {"step": 0, "name": "adoption-gate", "status": "completed"}
   ]
 }
