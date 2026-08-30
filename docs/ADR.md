@@ -1,51 +1,56 @@
 # Architecture Decision Records
 
-## 철학
-{프로젝트의 핵심 가치관 (예: MVP 속도 최우선. 외부 의존성 최소화. 작동하는 최소 구현을 선택.)}
+용어는 [CONTEXT.md](../CONTEXT.md), 전체 설계는
+[메인 기획서](<./TETR.IO AI Bot 기획서 v1.3.md>)를 참조한다.
 
----
+## ADR-001: 로컬 simulator 우선
 
-### ADR-001: {결정 사항 (예: Next.js App Router 선택)}
-**결정**: {뭘 선택했는지}
-**이유**: {왜 선택했는지}
-**트레이드오프**: {뭘 포기했는지}
+**상태**: Accepted
 
-### ADR-002: {결정 사항}
-**결정**: {뭘 선택했는지}
-**이유**: {왜 선택했는지}
-**트레이드오프**: {뭘 포기했는지}
+**결정**: 실제 TETR.IO 연결보다 Rules Engine, headless 1v1, self-play를 먼저 완성한다.
 
-### ADR-003: {결정 사항}
-**결정**: {뭘 선택했는지}
-**이유**: {왜 선택했는지}
-**트레이드오프**: {뭘 포기했는지}
+**이유**: 외부 승인과 네트워크 변수를 제거해 AI의 정확성·성능·재현성을 독립적으로 검증한다.
 
-### ADR-004: Step별 역할 분리형 품질 게이트
-**결정**: 구현 worker와 read-only code-review/test/security-review worker를 분리하고, 메인 에이전트가 리뷰·PR CI 결과를 종합한 뒤에만 커밋·병합한다.
-**이유**: 구현 변경과 검증 판단을 분리해 누락된 요구사항, 테스트 부족, YAML·경로·입력·로그 보안 문제를 구현 단계에서 반복적으로 수정할 수 있어야 한다.
-**트레이드오프**: 한 step마다 리뷰와 CI 대기 시간이 늘어나지만, 실패 원인과 수정 제안이 다음 구현 시도에 남고 리뷰 worker의 우발적 변경을 차단할 수 있다.
+**트레이드오프**: 실제 환경과의 차이는 후속 adapter 프로젝트에서 다시 검증해야 한다.
 
-### ADR-005: Implementation watchdog lifecycle
-**결정**: implementation attempt는 `started_at`부터 1800초로 제한하고, runtime heartbeat와 사용자 status update는 60초 간격으로 유지한다. timeout 재시도(`stuck_retry`)와 review/CI 재시도(`pipeline_attempt`)를 분리한다.
-**이유**: heartbeat가 계속 살아 있어도 무한 implementation을 허용하면 main session이 진행을 판단할 수 없다.
-**트레이드오프**: 실행 adapter가 deadline을 존중해야 하며, 최대 stuck retry 초과 시 자동 복구 대신 `error`로 멈춘다.
+## ADR-002: 구현 시작일 ruleset과 고정 preset
 
-### ADR-006: Project-defined validation profile
-**결정**: `.harness/validation.json`의 argv command와 reviewer/stop 역할을 validation source of truth로 사용한다.
-**이유**: skeleton core가 Python, Node, Go, Rust 도구를 추측하거나 reviewer마다 같은 suite를 중복 실행하지 않게 한다.
-**트레이드오프**: concrete project가 profile을 작성해야 하며, required check 누락은 fail-closed 된다.
+**상태**: Accepted
 
-### ADR-007: Step validation policy
-**결정**: step kind별 `required`, `regression`, `optional`, `none` test-change policy를 사용한다.
-**이유**: feature/bugfix 보호는 유지하면서 docs, CI, config, metadata 작업에 불필요한 test-file 변경을 강제하지 않는다.
-**트레이드오프**: bugfix는 regression test 경로를 명시해야 하고, optional step은 기존 validation 결과에 더 의존한다.
+**결정**: 구현 시작일의 공개·관찰 가능한 규칙을 versioned snapshot으로 고정하고,
+학습·benchmark·최종 Bot 환경에는 하나의 Bot Standard Preset만 사용한다.
 
-### ADR-008: Durable completion criteria
-**결정**: 사용자 확인 후 criteria를 Markdown artifact로 저장하고 pipeline은 session-local draft state를 source of truth로 사용하지 않는다.
-**이유**: 새 세션도 phase metadata, step artifact, confirmed criteria artifact만 읽어 workflow 상태를 복원할 수 있어야 한다.
-**트레이드오프**: 사용자 확인은 명시적 입력으로 남고, artifact write/read 검증이 추가된다.
+**이유**: TETR.IO 변경으로 과거 결과가 흔들리는 것을 막고 비교 조건을 통제한다.
 
-### ADR-009: Git-first reviewer mutation detection
-**결정**: reviewer 전후 Git status와 파일 digest를 우선 비교하고, non-Git workspace만 제한된 filesystem snapshot으로 보완한다. generated output은 profile의 `reviewMutationIgnore`로만 예외 처리한다.
-**이유**: 대형 repository의 전체 파일 해시 비용과 generated artifact false positive를 줄이면서 tracked/untracked mutation을 잡는다.
-**트레이드오프**: ignore 설정이 과도하면 검출 범위가 줄어들므로 `.git` metadata는 별도 검사로 항상 차단한다.
+**트레이드오프**: 규칙 변경 때마다 snapshot, fixture, 관련 테스트를 함께 갱신해야 한다.
+
+## ADR-003: GameState와 Agent를 외부 연결 경계로 사용
+
+**상태**: Accepted
+
+**결정**: AI는 GameState만 입력받아 Move를 반환하는 Agent 계약을 따른다.
+
+**이유**: Simulator와 향후 adapter를 분리하면서 Search·Evaluator를 재사용할 수 있다.
+
+**트레이드오프**: 상태 모델과 전이 순서를 초기에 정밀하게 정의해야 한다.
+
+## ADR-004: Heuristic + Beam Search를 기본으로 하고 Neural은 선택 사항으로 둠
+
+**상태**: Accepted
+
+**결정**: Greedy/Heuristic을 baseline으로 만들고 Beam Search를 주력으로 한다. Neural evaluator는
+기존 Search 대비 실제 VS 성능 향상이 benchmark로 확인될 때만 채택한다.
+
+**이유**: 로컬 CPU 실행과 빠른 반복을 우선하고 불필요한 모델 복잡도를 피한다.
+
+**트레이드오프**: Neural 도입을 미루는 대신 복잡한 포지션의 성능 개선을 heuristic/search에 의존한다.
+
+## ADR-005: AI 판단과 실행 속도 분리
+
+**상태**: Accepted
+
+**결정**: AI는 최선의 Move를 계산하고 Execution Scheduler가 target PPS에 맞춰 실행한다.
+
+**이유**: 같은 AI를 여러 속도로 평가하고 strength와 PPS를 독립적으로 조절하기 위해서다.
+
+**트레이드오프**: 계산 지연이나 늦은 path가 target PPS를 못 맞추는 경우의 정책을 별도로 테스트해야 한다.
